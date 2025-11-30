@@ -226,8 +226,8 @@ Launchd does not show “exit codes” as nicely as `schtasks`, but you can insp
 sudo launchctl print system/io.nethorror.netbird-delayed-update | sed -n '1,80p'
 ~~~
 
-The script writes its own logs into `/var/lib/netbird-delayed-update/`, which is usually проще, чем пытаться
-выковыривать всё из unified logging macOS.
+The script writes its own logs into `/var/lib/netbird-delayed-update/`,  
+which is usually much simpler than trying to dig everything out of macOS unified logging.
 
 ---
 
