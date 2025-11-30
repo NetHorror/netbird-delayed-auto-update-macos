@@ -20,12 +20,13 @@
 #  --max-random-delay-seconds N  Max random delay (seconds) before check (default: 3600).
 #  --daily-time "HH:MM"          Time of day for launchd StartCalendarInterval (default: 04:00).
 #  --label NAME                  Launchd label (default: io.nethorror.netbird-delayed-update).
+#  -r, --run-at-load             With --install: also run once at boot (RunAtLoad=true).
 #  --remove-state                (with --uninstall) also remove state/log directory.
 #
 # Requirements:
-#  - macOS with launchd (обычная macOS :)
-#  - netbird уже установлен (например через install.sh / pkg / brew)
-#  - root (sudo) для install/uninstall и запуска по расписанию
+#  - macOS with launchd
+#  - NetBird already installed (for example via install.sh / pkg / brew)
+#  - root (sudo) for install/uninstall and scheduled runs
 #
 
 set -euo pipefail
@@ -44,6 +45,7 @@ TASK_LABEL="io.nethorror.netbird-delayed-update"
 
 MODE="run"
 REMOVE_STATE="false"
+RUN_AT_LOAD="false"
 
 # Will be set later
 SCRIPT_PATH=""
@@ -55,37 +57,41 @@ NOW_UTC=""
 usage() {
   cat <<EOF
 Usage:
-  sudo $0 [mode] [options]
+  sudo \$0 [mode] [options]
 
 Modes:
   -i, --install           Install launchd daemon (daily check).
   -u, --uninstall         Uninstall launchd daemon.
-      (no mode)          Run a single delayed-update check.
+      (no mode)           Run a single delayed-update check.
 
 Options:
   --delay-days N                How many days a new version must stay unchanged (default: ${DELAY_DAYS}).
   --max-random-delay-seconds N  Max random delay before check in seconds (default: ${MAX_RANDOM_DELAY_SECONDS}).
   --daily-time "HH:MM"          Time of day when launchd should run the check (default: ${DAILY_TIME}).
   --label NAME                  Launchd label (default: ${TASK_LABEL}).
+  -r, --run-at-load             With --install: also run once at boot (RunAtLoad=true).
   --remove-state                With --uninstall: also remove ${STATE_DIR}.
   -h, --help                    Show this help.
 
 Examples:
 
   # Install launchd task with defaults (DelayDays=3, jitter up to 1h, 04:00):
-  sudo $0 --install
+  sudo \$0 --install
 
   # Install with custom settings:
-  sudo $0 -i --delay-days 5 --max-random-delay-seconds 600 --daily-time "03:30"
+  sudo \$0 -i --delay-days 5 --max-random-delay-seconds 600 --daily-time "03:30"
+
+  # Install with RunAtLoad enabled (run once at boot if missed):
+  sudo \$0 -i -r --delay-days 3 --max-random-delay-seconds 3600 --daily-time "04:00"
 
   # Uninstall but keep state/logs:
-  sudo $0 --uninstall
+  sudo \$0 --uninstall
 
   # Uninstall and delete state/logs directory:
-  sudo $0 -u --remove-state
+  sudo \$0 -u --remove-state
 
   # One-off run (for testing), no delay, no aging:
-  sudo $0 --delay-days 0 --max-random-delay-seconds 0
+  sudo \$0 --delay-days 0 --max-random-delay-seconds 0
 EOF
 }
 
@@ -216,6 +222,13 @@ install_launchd() {
 
   local plist_path="${LAUNCHD_DIR}/${TASK_LABEL}.plist"
 
+  local run_at_load_tag
+  if [[ "$RUN_AT_LOAD" == "true" ]]; then
+    run_at_load_tag="<true/>"
+  else
+    run_at_load_tag="<false/>"
+  fi
+
   cat >"$plist_path" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -247,7 +260,7 @@ install_launchd() {
   <string>${STATE_DIR}/launchd.log</string>
 
   <key>RunAtLoad</key>
-  <true/>
+  ${run_at_load_tag}
 </dict>
 </plist>
 EOF
@@ -395,6 +408,9 @@ while [[ $# -gt 0 ]]; do
     --label)
       shift
       TASK_LABEL="${1:-$TASK_LABEL}"
+      ;;
+    -r|--run-at-load)
+      RUN_AT_LOAD="true"
       ;;
     -h|--help)
       usage
