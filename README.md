@@ -37,7 +37,7 @@ This script uses the **official NetBird installer**:
   and runs it with `--update`.
 
 This is the same mechanism that NetBird documents for macOS, and it automatically picks the
-correct build for **Intel** and **Apple Silicon (M1/M2/M3)**.
+correct build for **Intel** and **Apple Silicon**.
 
 ---
 
@@ -55,7 +55,7 @@ correct build for **Intel** and **Apple Silicon (M1/M2/M3)**.
 
 ## Requirements
 
-- macOS (Intel или Apple Silicon)
+- macOS (Intel or Apple Silicon)
 - bash, curl
 - NetBird already installed
 - Optional: [Git](https://git-scm.com) (for installation via `git clone`)
