@@ -55,8 +55,8 @@ correct build for **Intel** and **Apple Silicon (M1/M2/M3)**.
 
 ## Requirements
 
-- macOS with `launchd` (обычная современная macOS)
-- `bash` (встроенный в macOS)
+- macOS with `launchd`
+- `bash` 
 - `curl`
 - NetBird already installed (e.g. via the official `install.sh` or pkg)
 - `sudo` / root access for:
