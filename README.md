@@ -55,10 +55,11 @@ correct build for **Intel** and **Apple Silicon (M1/M2/M3)**.
 
 ## Requirements
 
-- macOS with `launchd`
-- `bash` 
-- `curl`
-- NetBird already installed (e.g. via the official `install.sh` or pkg)
+- macOS (Intel или Apple Silicon)
+- bash, curl
+- NetBird already installed
+- Optional: [Git](https://git-scm.com) (for installation via `git clone`)
+  – otherwise you can use "Download ZIP" on GitHub
 - `sudo` / root access for:
   - installing/removing launchd daemons,
   - running updates.
@@ -80,7 +81,7 @@ netbird-delayed-auto-update-macos/
 
 ## Quick start
 
-Clone the repository and install the daily launchd job:
+Open **Terminal**:
 
 ~~~bash
 git clone https://github.com/NetHorror/netbird-delayed-auto-update-macos.git
@@ -90,6 +91,16 @@ cd netbird-delayed-auto-update-macos
 sudo ./netbird-delayed-update-macos.sh --install
 # or shorter:
 # sudo ./netbird-delayed-update-macos.sh -i
+~~~
+
+If you don't have Git installed, you can download the repository as a ZIP from GitHub  
+("Code" → "Download ZIP"), extract it and run:
+
+~~~bash
+cd /path/to/netbird-delayed-auto-update-macos
+
+# Same install command:
+sudo ./netbird-delayed-update-macos.sh --install
 ~~~
 
 After successful installation, you should see a launchd daemon with label:
