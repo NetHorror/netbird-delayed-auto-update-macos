@@ -247,7 +247,7 @@ install_launchd() {
   <string>${STATE_DIR}/launchd.log</string>
 
   <key>RunAtLoad</key>
-  <false/>
+  <true/>
 </dict>
 </plist>
 EOF
