@@ -293,5 +293,3 @@ sudo ./netbird-delayed-update-macos.sh -u --remove-state
 NetBird itself is **not** removed – only the delayed update mechanism.
 
 ---
-
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) ![Platform: macOS](https://img.shields.io/badge/platform-macOS-informational) ![Init: launchd](https://img.shields.io/badge/init-launchd-blue) ![Shell: bash](https://img.shields.io/badge/shell-bash-green)
