@@ -91,7 +91,9 @@ cd netbird-delayed-auto-update-macos
 chmod +x netbird-delayed-update-macos.sh
 
 # Default: DelayDays=3, MaxRandomDelaySeconds=3600, time 04:00
-sudo ./netbird-delayed-update-macos.sh -i
+sudo ./netbird-delayed-update-macos.sh --install
+# or shorter:
+# sudo ./netbird-delayed-update-macos.sh -i
 ~~~
 
 If you don't have Git installed, you can download the repository as a ZIP from GitHub  
@@ -320,5 +322,3 @@ sudo ./netbird-delayed-update-macos.sh -u --remove-state
 NetBird itself is **not** removed – only the delayed update mechanism.
 
 ---
-
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) ![Platform: macOS](https://img.shields.io/badge/platform-macOS-informational) ![Init: launchd](https://img.shields.io/badge/init-launchd-blue) ![Shell: bash](https://img.shields.io/badge/shell-bash-green)
