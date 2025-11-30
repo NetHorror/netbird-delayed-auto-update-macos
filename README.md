@@ -56,10 +56,10 @@ correct build for **Intel** and **Apple Silicon**.
 ## Requirements
 
 - macOS (Intel or Apple Silicon)
-- bash, curl
+- `bash`, `curl`
 - NetBird already installed
-- Optional: [Git](https://git-scm.com) (for installation via `git clone`)
-  – otherwise you can use "Download ZIP" on GitHub
+- Optional: [Git](https://git-scm.com) (for installation via `git clone`) –  
+  otherwise you can use "Download ZIP" on GitHub
 - `sudo` / root access for:
   - installing/removing launchd daemons,
   - running updates.
@@ -108,6 +108,7 @@ chmod +x netbird-delayed-update-macos.sh
 # Same install command:
 sudo ./netbird-delayed-update-macos.sh --install
 ~~~
+
 If you see errors like `permission denied` or `command not found` when running the script,  
 run `chmod +x netbird-delayed-update-macos.sh` and try again.
 
@@ -151,7 +152,14 @@ sudo ./netbird-delayed-update-macos.sh -i \
   --daily-time "03:30"
 
 # Custom launchd label (if you run multiple variants)
-sudo ./netbird-delayed-update-macos.sh -i --label io.nethorror.netbird-delayed-update-custom
+sudo ./netbird-delayed-update-macos.sh -i \
+  --label io.nethorror.netbird-delayed-update-custom
+
+# Install with RunAtLoad enabled (run once at boot if missed)
+sudo ./netbird-delayed-update-macos.sh -i -r \
+  --delay-days 3 \
+  --max-random-delay-seconds 3600 \
+  --daily-time "04:00"
 ~~~
 
 Supported options:
@@ -163,6 +171,8 @@ Supported options:
 - `--daily-time "HH:MM"` – time of day (24h) when launchd should start the job  
   (default: `04:00`).
 - `--label NAME` – launchd label (default: `io.nethorror.netbird-delayed-update`).
+- `-r`, `--run-at-load` – with `--install`, sets `RunAtLoad=true` so the job also runs once at
+  boot if the Mac was powered off at the scheduled time.
 
 ---
 
@@ -237,6 +247,12 @@ sudo launchctl print system/io.nethorror.netbird-delayed-update | sed -n '1,80p'
 The script writes its own logs into `/var/lib/netbird-delayed-update/`,  
 which is usually much simpler than trying to dig everything out of macOS unified logging.
 
+With the default settings (`RunAtLoad=false`), missed runs while the Mac is powered off
+are simply skipped and the job runs again at the next scheduled time.
+
+If you install with `-r` / `--run-at-load`, launchd will also run the job once at boot
+(`RunAtLoad=true`), which is useful for laptops that are often turned off at night.
+
 ---
 
 ## Manual one-off run (for testing)
@@ -256,6 +272,11 @@ This will:
 - log the decisions,
 - update `state.json`,
 - and, if needed, run the official `install.sh --update` to upgrade NetBird.
+
+> **Note:** with the default `MaxRandomDelaySeconds=3600` the script may sleep for up to 1 hour  
+> before doing any checks. For testing, it is usually better to set  
+> `--max-random-delay-seconds 0` (and optionally `--delay-days 0`) so that you can see  
+> the full behaviour immediately in the log.
 
 ---
 
@@ -301,3 +322,5 @@ sudo ./netbird-delayed-update-macos.sh -u --remove-state
 NetBird itself is **not** removed – only the delayed update mechanism.
 
 ---
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) ![Platform: macOS](https://img.shields.io/badge/platform-macOS-informational) ![Init: launchd](https://img.shields.io/badge/init-launchd-blue) ![Shell: bash](https://img.shields.io/badge/shell-bash-green)
