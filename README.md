@@ -91,9 +91,7 @@ cd netbird-delayed-auto-update-macos
 chmod +x netbird-delayed-update-macos.sh
 
 # Default: DelayDays=3, MaxRandomDelaySeconds=3600, time 04:00
-sudo ./netbird-delayed-update-macos.sh --install
-# or shorter:
-# sudo ./netbird-delayed-update-macos.sh -i
+sudo ./netbird-delayed-update-macos.sh -i
 ~~~
 
 If you don't have Git installed, you can download the repository as a ZIP from GitHub  
