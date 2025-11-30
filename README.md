@@ -104,7 +104,7 @@ cd /path/to/netbird-delayed-auto-update-macos
 chmod +x netbird-delayed-update-macos.sh
 
 # Same install command:
-sudo ./netbird-delayed-update-macos.sh --install
+sudo ./netbird-delayed-update-macos.sh -i
 ~~~
 
 If you see errors like `permission denied` or `command not found` when running the script,  
@@ -306,9 +306,7 @@ You can review these logs to see:
 To remove the launchd job (but keep state/logs):
 
 ~~~bash
-sudo ./netbird-delayed-update-macos.sh --uninstall
-# or shorter:
-# sudo ./netbird-delayed-update-macos.sh -u
+sudo ./netbird-delayed-update-macos.sh -u
 ~~~
 
 To remove both the job **and** the state/logs directory:
