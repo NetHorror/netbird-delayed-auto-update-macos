@@ -1,0 +1,1 @@
+# netbird-delayed-auto-update-macos
