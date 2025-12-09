@@ -1,320 +1,233 @@
-# NetBird Delayed Auto-Update for macOS (launchd)
+# NetBird Delayed Auto-Update for macOS
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) ![Platform: macOS](https://img.shields.io/badge/platform-macOS-informational) ![Init: launchd](https://img.shields.io/badge/init-launchd-blue) ![Shell: bash](https://img.shields.io/badge/shell-bash-green)
 
-Delayed (staged) auto-update for the NetBird client on macOS.
+Helper script that implements **delayed / staged** updates for the NetBird client on macOS.
 
-> Don’t upgrade NetBird clients immediately when a new NetBird version appears.  
-> Instead, wait **N days**. If that version is quickly replaced (bad release / hotfix),  
-> clients will **never** upgrade to it.
+Instead of upgrading to the latest available version immediately, new versions must "age" for a configurable number of days before they are installed. Short-lived or broken releases that are quickly replaced will never reach your machine.
 
----
+This project mirrors the behaviour of the Windows delayed update script but is tailored to macOS (launchd, `/usr/local/bin`, `/opt/homebrew/bin`, etc.).
 
-## Idea
-
-* A **candidate** NetBird version must “age” for **N days** before being deployed.
-* If the same version stays available for `DelayDays` without changes, the installed client is upgraded.
-* If a **newer** version appears during the aging period, the timer is reset and we start counting again.
-* NetBird is **not auto-installed** – only upgraded if it is already installed locally.
-* Uses `launchd` to run a small bash script once per day.
-
-State and logs are stored in:
-
-~~~text
-/var/lib/netbird-delayed-update/
-~~~
-
-`state.json` keeps the “aging” state, logs go into timestamped `netbird-delayed-update-*.log` files.
-
----
-
-## How updates are performed (predictable variant)
-
-This script uses the **official NetBird installer**:
-
-- It queries the latest version from `https://pkgs.netbird.io/releases/latest`.
-- When it decides to upgrade, it downloads `install.sh` from `https://pkgs.netbird.io/install.sh`
-  and runs it with `--update`.
-
-This is the same mechanism that NetBird documents for macOS, and it automatically picks the
-correct build for **Intel** and **Apple Silicon**.
+Current script version: **0.1.2**
 
 ---
 
 ## Features
 
-- ⏳ **Version aging** – only upgrades after a candidate version has been stable for `DelayDays`.
-- 🕓 **Daily launchd job** – runs once per day at a configurable time (default: `04:00`).
-- 🎲 **Optional random delay** – spreads the actual execution time over a random window (`MaxRandomDelaySeconds`).
-- 🧱 **Local state tracking** – remembers last seen candidate version and when it was first observed.
-- 🛑 **No silent install** – if NetBird is not installed, the script exits without doing anything.
-- 📜 **Detailed logs** – logs each decision (first seen, still aging, upgraded, already up-to-date, etc.).
-- 🧩 **Single script** – one bash script handles install, uninstall and the actual update logic.
+- **Delayed rollout (version aging)**
+  - New NetBird versions become "candidates".
+  - A candidate must stay unchanged for `--delay-days` days before upgrade is allowed.
+  - State is stored in a small JSON file under `/var/lib/netbird-delayed-update/state.json`.
+
+- **Safe CLI detection**
+  - Works with NetBird installed via:
+    - the official installer script (`install.sh`), or
+    - Homebrew (`netbirdio/tap/netbird`).
+  - Ensures `/opt/homebrew/bin` and `/usr/local/bin` are part of `PATH` even when launched by `launchd` as root.
+
+- **Log files with retention**
+  - Logs are written to `/var/lib/netbird-delayed-update/netbird-delayed-update-*.log`.
+  - `--log-retention-days` (default: 60) controls how long to keep old logs.
+  - `--log-retention-days 0` disables log cleanup.
+
+- **Script self-update (optional)**
+  - On each run, the script checks the latest GitHub release of this repository.
+  - If a newer version exists, it either:
+    - pulls from git (`git pull --ff-only`), or
+    - downloads `netbird-delayed-update-macos.sh` from the tagged version on `raw.githubusercontent.com` and overwrites the local file.
+  - The new script is used on the next run.
+
+- **Launchd-friendly**
+  - `--install` / `--uninstall` to manage a root launchd daemon.
+  - Configurable run time (`--daily-time "HH:MM"`).
+  - Optional `RunAtLoad` flag (`-r` / `--run-at-load`) to run once when the machine boots.
 
 ---
 
 ## Requirements
 
-- macOS (Intel or Apple Silicon)
-- `bash`, `curl`
-- NetBird already installed
-- Optional: [Git](https://git-scm.com) (for installation via `git clone`) –  
-  otherwise you can use "Download ZIP" on GitHub
-- `sudo` / root access for:
-  - installing/removing launchd daemons,
-  - running updates.
-
-NetBird install docs for macOS: <https://docs.netbird.io/get-started/install/macos>
+- macOS with a working `bash` and `curl`.
+- NetBird CLI installed:
+  - either via the official installer (`install.sh`), or
+  - via Homebrew: `brew install netbirdio/tap/netbird`.
+- Root privileges (via `sudo`) to:
+  - install / uninstall the launchd daemon,
+  - and to run the script in production.
 
 ---
 
-## Repository structure
+## Installation
 
-~~~text
-netbird-delayed-auto-update-macos/
-├─ README.md
-├─ LICENSE
-└─ netbird-delayed-update-macos.sh
-~~~
-
----
-
-## Quick start
-
-Open **Terminal**:
+1. Clone or download this repository:
 
 ~~~bash
 git clone https://github.com/NetHorror/netbird-delayed-auto-update-macos.git
 cd netbird-delayed-auto-update-macos
-
-# Make sure the script is executable (normally it is, but just in case):
-chmod +x netbird-delayed-update-macos.sh
-
-# Default: DelayDays=3, MaxRandomDelaySeconds=3600, time 04:00, run once at boot if missed
-sudo ./netbird-delayed-update-macos.sh -i -r
 ~~~
 
-If you don't have Git installed, you can download the repository as a ZIP from GitHub  
-("Code" → "Download ZIP"), extract it and run:
+2. Make sure the script is executable:
 
 ~~~bash
-cd /path/to/netbird-delayed-auto-update-macos
-
-# Make sure the script is executable (if needed):
-chmod +x netbird-delayed-update-macos.sh
-
-# Same install command:
-sudo ./netbird-delayed-update-macos.sh -i
+chmod +x ./netbird-delayed-update-macos.sh
 ~~~
 
-If you see errors like `permission denied` or `command not found` when running the script,  
-run `chmod +x netbird-delayed-update-macos.sh` and try again.
-
-After successful installation, you should see a launchd daemon with label:
-
-~~~text
-io.nethorror.netbird-delayed-update
-~~~
-
-Check status:
+3. (Optional) Test a one-off run with no delay and no random jitter:
 
 ~~~bash
-sudo launchctl list | grep netbird-delayed-update
-sudo launchctl print system/io.nethorror.netbird-delayed-update 2>/dev/null || true
-~~~
-
-The job is configured to run once per day at `04:00` (plus optional random delay).
-
----
-
-## Installation options
-
-The script has three modes:
-
-- **Install mode** – `--install` / `-i`  
-  Creates or updates the launchd plist and loads it.
-- **Uninstall mode** – `--uninstall` / `-u`  
-  Unloads and removes the launchd plist (optionally state/logs).
-- **Run mode** – no `--install` / `--uninstall`  
-  Performs a single delayed-update check. This is what launchd uses.
-
-### Install parameters
-
-Examples:
-
-~~~bash
-# Wait 5 days, no random delay, run at 03:30
-sudo ./netbird-delayed-update-macos.sh -i \
-  --delay-days 5 \
-  --max-random-delay-seconds 0 \
-  --daily-time "03:30"
-
-# Custom launchd label (if you run multiple variants)
-sudo ./netbird-delayed-update-macos.sh -i \
-  --label io.nethorror.netbird-delayed-update-custom
-
-# Install with RunAtLoad enabled (run once at boot if missed)
-sudo ./netbird-delayed-update-macos.sh -i -r \
-  --delay-days 3 \
-  --max-random-delay-seconds 3600 \
-  --daily-time "04:00"
-~~~
-
-Supported options:
-
-- `--delay-days N` – how many days a new NetBird version must stay unchanged before upgrade  
-  (default: `3`).
-- `--max-random-delay-seconds N` – max random delay added after the scheduled start time  
-  (default: `3600` seconds).
-- `--daily-time "HH:MM"` – time of day (24h) when launchd should start the job  
-  (default: `04:00`).
-- `--label NAME` – launchd label (default: `io.nethorror.netbird-delayed-update`).
-- `-r`, `--run-at-load` – with `--install`, sets `RunAtLoad=true` so the job also runs once at
-  boot if the Mac was powered off at the scheduled time.
-
----
-
-## How it works (details)
-
-Once per day, launchd runs:
-
-~~~text
-/var/root/path/to/netbird-delayed-update-macos.sh \
-  --delay-days <DelayDays> \
-  --max-random-delay-seconds <MaxRandomDelaySeconds>
-~~~
-
-On each run, the script:
-
-1. Optionally sleeps for a **random delay** between `0` and `MaxRandomDelaySeconds` seconds.
-2. Verifies that `netbird` CLI is available in `PATH`.
-3. Reads the **local NetBird version** via:
-
-   ~~~bash
-   netbird version
-   ~~~
-
-4. Queries the **latest available version** from:
-
-   ~~~bash
-   curl -fsSL https://pkgs.netbird.io/releases/latest
-   ~~~
-
-   and extracts the `tag_name` (e.g. `v0.60.4` → `0.60.4`).
-
-5. Loads `state.json` from `/var/lib/netbird-delayed-update/`:
-   - candidate version (`CandidateVersion`),
-   - when it was first seen (`FirstSeenUtc`),
-   - when it was last checked (`LastCheckUtc`).
-
-6. If a **new candidate version** appears:
-   - updates `CandidateVersion`,
-   - sets `FirstSeenUtc` to now,
-   - starts the aging period.
-
-7. Computes the **age in days** of the candidate version; if age `< DelayDays`:
-   - logs that it is “still aging” and exits without upgrade.
-
-8. If age `≥ DelayDays` and the **local version is older**:
-   - logs the planned upgrade,
-   - stops the NetBird service (via `netbird service stop`),
-   - downloads the official installer and runs it:
-
-     ~~~bash
-     curl -fsSLO https://pkgs.netbird.io/install.sh
-     chmod +x install.sh
-     ./install.sh --update
-     ~~~
-
-   - starts the NetBird service again (`netbird service start`),
-   - logs the new local version.
-
-Short-lived or “bad” versions that are quickly replaced in the NetBird repo are **never** deployed to your clients,  
-because they do not survive the `DelayDays` aging period.
-
----
-
-## launchd notes
-
-Launchd does not show “exit codes” as nicely as `schtasks`, but you can inspect logs:
-
-~~~bash
-sudo launchctl print system/io.nethorror.netbird-delayed-update | sed -n '1,80p'
-~~~
-
-The script writes its own logs into `/var/lib/netbird-delayed-update/`,  
-which is usually much simpler than trying to dig everything out of macOS unified logging.
-
-With the default settings (`RunAtLoad=false`), missed runs while the Mac is powered off
-are simply skipped and the job runs again at the next scheduled time.
-
-If you install with `-r` / `--run-at-load`, launchd will also run the job once at boot
-(`RunAtLoad=true`), which is useful for laptops that are often turned off at night.
-
----
-
-## Manual one-off run (for testing)
-
-You can run the delayed-update logic manually without touching launchd:
-
-~~~bash
-# Run immediately, no random delay, no "aging" period (for testing)
 sudo ./netbird-delayed-update-macos.sh \
   --delay-days 0 \
-  --max-random-delay-seconds 0
+  --max-random-delay-seconds 0 \
+  --log-retention-days 60
+~~~
+
+You should see log output mentioning the local NetBird version and the latest version from `pkgs.netbird.io`. The full log file is stored under:
+
+~~~text
+/var/lib/netbird-delayed-update/netbird-delayed-update-YYYYMMDD-HHMMSS.log
+~~~
+
+---
+
+## Installing the launchd daemon
+
+To install a daily check with default settings:
+
+- delay: 10 days  
+- random jitter: up to 3600 seconds  
+- time: 04:00 UTC  
+- log retention: 60 days  
+
+run:
+
+~~~bash
+sudo ./netbird-delayed-update-macos.sh --install
+~~~
+
+To customise the schedule and settings:
+
+~~~bash
+sudo ./netbird-delayed-update-macos.sh --install \
+  --delay-days 10 \
+  --max-random-delay-seconds 3600 \
+  --log-retention-days 60 \
+  --daily-time "04:00" \
+  -r
 ~~~
 
 This will:
 
-- perform all checks,
-- log the decisions,
-- update `state.json`,
-- and, if needed, run the official `install.sh --update` to upgrade NetBird.
-
-> **Note:** with the default `MaxRandomDelaySeconds=3600` the script may sleep for up to 1 hour  
-> before doing any checks. For testing, it is usually better to set  
-> `--max-random-delay-seconds 0` (and optionally `--delay-days 0`) so that you can see  
-> the full behaviour immediately in the log.
+- create `/Library/LaunchDaemons/io.nethorror.netbird-delayed-update.plist`;
+- schedule the script to run daily at the specified time;
+- configure `RunAtLoad` (if `-r` is used), so a run happens soon after boot if the scheduled time was missed;
+- log stdout/stderr to `/var/lib/netbird-delayed-update/launchd.log`.
 
 ---
 
-## Logs
+## Uninstalling the launchd daemon
 
-Log files are stored in:
+To remove only the launchd job:
+
+~~~bash
+sudo ./netbird-delayed-update-macos.sh --uninstall
+~~~
+
+To also remove state and logs under `/var/lib/netbird-delayed-update`:
+
+~~~bash
+sudo ./netbird-delayed-update-macos.sh --uninstall --remove-state
+~~~
+
+---
+
+## Behaviour details
+
+### Where state and logs are stored
+
+All runtime files live under:
 
 ~~~text
 /var/lib/netbird-delayed-update/
 ~~~
 
-File names look like:
+- `state.json` – delayed rollout state:
+  - `CandidateVersion`
+  - `FirstSeenUtc`
+  - `LastCheckUtc`
+- `netbird-delayed-update-*.log` – per-run logs.
+- `launchd.log` – stdout/stderr from the launchd daemon.
 
-~~~text
-netbird-delayed-update-YYYYMMDD-HHMMSS.log
-~~~
+### Delayed rollout logic
 
-You can review these logs to see:
+On each run (either manual or via launchd), the script:
 
-- when a candidate version was first observed,
-- how long it aged,
-- when an upgrade actually happened,
-- any warnings or errors (missing `netbird`, network failures, etc.).
+1. Ensures NetBird CLI is available in `PATH` (`netbird` must resolve).
+2. Reads the local version:
+
+   ~~~bash
+   netbird version
+   ~~~
+
+3. Fetches the latest available version from:
+
+   ~~~text
+   https://pkgs.netbird.io/releases/latest
+   ~~~
+
+   and extracts a `vX.Y.Z` tag, which is normalised to `X.Y.Z`.
+
+4. Loads `state.json`. If the candidate version changed compared to the last run:
+   - updates `CandidateVersion` and resets `FirstSeenUtc` to now.
+5. Computes the age (in days) of the candidate:
+   - age is clamped to at least 0 days (no negative values on clock skew).
+6. If `age < delayDays`:
+   - logs that the version is still aging and **does not** upgrade.
+7. If the candidate has aged enough:
+   - compares local vs candidate version semantically;
+   - if local is older:
+     - calls the official installer (`install.sh --update`);
+     - restarts the NetBird service via `netbird service stop/start`.
 
 ---
 
-## Uninstall
+## Script self-update
 
-To remove the launchd job (but keep state/logs):
+In run mode, the script first checks whether there is a newer version of itself:
+
+1. Queries the GitHub API for the latest release of this repo.
+2. Parses the tag name (expected `X.Y.Z`).
+3. Compares it with `SCRIPT_VERSION` defined near the top.
+
+If a newer version exists:
+
+- If the script lives inside a git repository and `git` is available:
+  - `git pull --ff-only` is executed in the repo root.
+- Otherwise:
+  - the script is downloaded from:
+
+    ~~~text
+    https://raw.githubusercontent.com/NetHorror/netbird-delayed-auto-update-macos/<tag>/netbird-delayed-update-macos.sh
+    ~~~
+
+  - and overwrites the local file.
+
+The current run continues with the old version; the next run will use the updated script.
+
+To disable self-update, set:
 
 ~~~bash
-sudo ./netbird-delayed-update-macos.sh -u
+SELFUPDATE_REPO=""
 ~~~
 
-To remove both the job **and** the state/logs directory:
-
-~~~bash
-sudo ./netbird-delayed-update-macos.sh -u --remove-state
-~~~
-
-NetBird itself is **not** removed – only the delayed update mechanism.
+inside `netbird-delayed-update-macos.sh`.
 
 ---
+
+## Versioning
+
+This project uses semantic versioning:
+
+- **0.1.2** – self-update, log retention, stable version detection, safer age handling.
+- **0.1.1** – ensured NetBird CLI is visible under launchd/root via PATH adjustments.
+- **0.1.0** – initial delayed-update implementation + launchd integration.
+
+See [`CHANGELOG.md`](./CHANGELOG.md) for details.
