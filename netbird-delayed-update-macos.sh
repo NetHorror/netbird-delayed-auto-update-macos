@@ -4,13 +4,6 @@
 # NetBird Delayed Auto-Update for macOS
 #
 # Delayed (staged) auto-update for the NetBird client on macOS.
-# Features:
-#   - Version aging: new versions must stay in "candidate" state for N days.
-#   - No auto-install: only updates an already installed NetBird CLI.
-#   - Launchd integration: daily checks via root daemon.
-#   - Log files with retention.
-#   - Script self-update via GitHub releases (this repo).
-#
 
 set -euo pipefail
 
@@ -69,26 +62,6 @@ Options:
   -r, --run-at-load             With --install: also run once at boot (RunAtLoad=true).
   --remove-state                With --uninstall: also remove ${STATE_DIR}.
   -h, --help                    Show this help.
-
-Examples:
-
-  # Install launchd task with defaults (DelayDays=10, jitter up to 1h, at 04:00):
-  sudo \$0 --install
-
-  # Install with custom settings:
-  sudo \$0 -i --delay-days 5 --max-random-delay-seconds 600 --daily-time "03:30"
-
-  # Install with RunAtLoad enabled (run once at boot if missed):
-  sudo \$0 -i -r --delay-days 10 --max-random-delay-seconds 3600 --daily-time "04:00"
-
-  # Uninstall but keep state/logs:
-  sudo \$0 --uninstall
-
-  # Uninstall and delete state/logs directory:
-  sudo \$0 -u --remove-state
-
-  # One-off run (for testing), no delay, no jitter:
-  sudo \$0 --delay-days 0 --max-random-delay-seconds 0
 EOF
 }
 
@@ -182,7 +155,7 @@ self_update_script() {
 
   local remote_tag
   remote_tag="$(echo "$json" \
-    | sed -n 's/.*"tag_name":[[:space:]]*"\([0-9]\+\.[0-9]\+\.[0-9]\+\)".*/\1/p' \
+    | sed -n 's/.*\"tag_name\":[[:space:]]*\"\([0-9]\+\.[0-9]\+\.[0-9]\+\)\".*/\1/p' \
     | head -n1)"
 
   if [[ -z "$remote_tag" ]]; then
@@ -199,15 +172,12 @@ self_update_script() {
 
   log "Self-update: newer script version available."
 
-  # Try git pull if inside a git repository
   if command -v git >/dev/null 2>&1; then
     local repo_dir
     repo_dir="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
-
     while [[ "$repo_dir" != "/" && ! -d "${repo_dir}/.git" ]]; do
       repo_dir="$(dirname "$repo_dir")"
     done
-
     if [[ -d "${repo_dir}/.git" ]]; then
       log "Self-update: running 'git pull --ff-only' in ${repo_dir}"
       if git -C "$repo_dir" pull --ff-only; then
@@ -223,7 +193,6 @@ self_update_script() {
     log "Self-update: git not found in PATH."
   fi
 
-  # Fallback: download from raw.githubusercontent.com
   local raw_url="https://raw.githubusercontent.com/${SELFUPDATE_REPO}/${remote_tag}/${SELFUPDATE_PATH}"
   log "Self-update: downloading script from ${raw_url}"
 
@@ -258,7 +227,6 @@ calc_age_days() {
   local now_ts
   local first_ts
 
-  # macOS BSD date format parsing; fallback to current time if parsing fails
   now_ts=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$NOW_UTC" +%s 2>/dev/null || date -u +%s)
   first_ts=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$first_seen" +%s 2>/dev/null || date -u +%s)
 
@@ -284,8 +252,8 @@ load_state() {
     return
   fi
 
-  CANDIDATE_VERSION="$(echo "$json" | sed -n 's/.*"CandidateVersion":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1 || true)"
-  FIRST_SEEN_UTC="$(echo "$json" | sed -n 's/.*"FirstSeenUtc":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1 || echo "$NOW_UTC")"
+  CANDIDATE_VERSION="$(echo "$json" | sed -n 's/.*\"CandidateVersion\":[[:space:]]*\"\([^"]*\)\".*/\1/p' | head -n1 || true)"
+  FIRST_SEEN_UTC="$(echo "$json" | sed -n 's/.*\"FirstSeenUtc\":[[:space:]]*\"\([^"]*\)\".*/\1/p' | head -n1 || echo "$NOW_UTC")"
 }
 
 save_state() {
@@ -302,7 +270,6 @@ EOF
 # -------------------- NetBird upgrade logic --------------------
 
 get_latest_netbird_version() {
-  # Use pkgs.netbird.io/releases/latest (similar to official install.sh)
   local url="https://pkgs.netbird.io/releases/latest"
   local output tag
 
@@ -322,14 +289,9 @@ get_latest_netbird_version() {
     return
   fi
 
-  # Strip leading v
   echo "${tag#v}"
 }
 
-# Detect installation type based on netbird binary location.
-# Returns:
-#   "brew"   - netbird binary lives under Homebrew Cellar.
-#   "other"  - any other installation type (pkg, bin, unknown).
 detect_install_type() {
   local nb_path
   nb_path="$(command -v netbird 2>/dev/null || true)"
@@ -342,7 +304,6 @@ detect_install_type() {
   local link
 
   if [ -L "$nb_path" ]; then
-    # Parse symlink target from ls output (portable on macOS).
     link="$(ls -l "$nb_path" 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="->") {print $(i+1); exit}}')"
     if [[ -n "$link" ]]; then
       target="$link"
@@ -356,7 +317,6 @@ detect_install_type() {
   fi
 }
 
-# Run Homebrew upgrade for NetBird as the Homebrew owner user.
 brew_upgrade_netbird() {
   local brew_bin brew_owner formula
 
@@ -377,7 +337,6 @@ brew_upgrade_netbird() {
     return 1
   fi
 
-  # Detect which formula is installed.
   if sudo -u "$brew_owner" "$brew_bin" list --formula netbirdio/tap/netbird >/dev/null 2>&1; then
     formula="netbirdio/tap/netbird"
   elif sudo -u "$brew_owner" "$brew_bin" list --formula netbird >/dev/null 2>&1; then
@@ -398,6 +357,41 @@ brew_upgrade_netbird() {
   fi
 }
 
+install_mac_pkg_direct() {
+  local arch
+  case "$(uname -m)" in
+    x86_64) arch="amd64" ;;
+    arm64|aarch64) arch="arm64" ;;
+    *)
+      log "Unsupported macOS arch: $(uname -m)"
+      return 1
+      ;;
+  esac
+
+  local pkg_url
+  pkg_url="$(curl -sIL -o /dev/null -w '%{url_effective}' "https://pkgs.netbird.io/macos/${arch}" 2>/dev/null || true)"
+  if [[ -z "$pkg_url" ]]; then
+    log "Failed to determine NetBird macOS installer URL."
+    return 1
+  fi
+
+  log "Downloading NetBird macOS installer from https://pkgs.netbird.io/macos/${arch}"
+  if ! curl -fsSL -o /tmp/netbird.pkg "$pkg_url"; then
+    log "Failed to download NetBird macOS installer."
+    return 1
+  fi
+
+  if ! installer -pkg /tmp/netbird.pkg -target /; then
+    log "Failed to run macOS installer."
+    rm -f /tmp/netbird.pkg || true
+    return 1
+  fi
+
+  rm -f /tmp/netbird.pkg || true
+  log "macOS pkg installation completed."
+  return 0
+}
+
 perform_upgrade() {
   local install_type
   install_type="$(detect_install_type)"
@@ -409,25 +403,15 @@ perform_upgrade() {
   fi
 
   if [[ "$install_type" == "brew" ]]; then
-    log "NetBird appears to be installed via Homebrew (Cellar path detected)."
-    if brew_upgrade_netbird; then
-      log "Finished Homebrew-based NetBird upgrade."
-    else
+    log "NetBird appears to be installed via Homebrew."
+    if ! brew_upgrade_netbird; then
       log "Homebrew-based NetBird upgrade failed; NetBird version might be unchanged."
     fi
   else
-    log "Running NetBird installer (install.sh --update)..."
-    local tmpdir="/tmp/netbird-delayed-update"
-    mkdir -p "$tmpdir"
-
-    (
-      cd "$tmpdir"
-      curl -fsSLO https://pkgs.netbird.io/install.sh
-      chmod +x install.sh
-      ./install.sh --update
-    )
-
-    rm -rf "$tmpdir"
+    log "NetBird appears to be installed via macOS pkg / app. Running pkg-based installer..."
+    if ! install_mac_pkg_direct; then
+      log "macOS pkg-based NetBird upgrade failed; NetBird version might be unchanged."
+    fi
   fi
 
   log "Starting NetBird service..."
@@ -447,7 +431,6 @@ run_once() {
 
   log "=== NetBird delayed update started, DelayDays=${DELAY_DAYS}, MaxRandomDelaySeconds=${MAX_RANDOM_DELAY_SECONDS} ==="
 
-  # Self-update script (does not affect current run)
   self_update_script
 
   if (( MAX_RANDOM_DELAY_SECONDS > 0 )); then
