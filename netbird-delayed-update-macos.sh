@@ -326,24 +326,109 @@ get_latest_netbird_version() {
   echo "${tag#v}"
 }
 
+# Detect installation type based on netbird binary location.
+# Returns:
+#   "brew"   - netbird binary lives under Homebrew Cellar.
+#   "other"  - any other installation type (pkg, bin, unknown).
+detect_install_type() {
+  local nb_path
+  nb_path="$(command -v netbird 2>/dev/null || true)"
+  if [[ -z "$nb_path" ]]; then
+    echo "other"
+    return
+  fi
+
+  local target="$nb_path"
+  local link
+
+  if [ -L "$nb_path" ]; then
+    # Parse symlink target from ls output (portable on macOS).
+    link="$(ls -l "$nb_path" 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="->") {print $(i+1); exit}}')"
+    if [[ -n "$link" ]]; then
+      target="$link"
+    fi
+  fi
+
+  if [[ "$target" == *"/Cellar/netbird/"* ]]; then
+    echo "brew"
+  else
+    echo "other"
+  fi
+}
+
+# Run Homebrew upgrade for NetBird as the Homebrew owner user.
+brew_upgrade_netbird() {
+  local brew_bin brew_owner formula
+
+  brew_bin="$(command -v brew 2>/dev/null || true)"
+  if [[ -z "$brew_bin" ]]; then
+    log "Homebrew binary 'brew' not found in PATH; cannot upgrade NetBird via Homebrew."
+    return 1
+  fi
+
+  brew_owner="$(stat -f "%Su" "$brew_bin" 2>/dev/null || true)"
+  if [[ -z "$brew_owner" ]]; then
+    log "Failed to determine Homebrew owner user; cannot upgrade NetBird via Homebrew."
+    return 1
+  fi
+
+  if ! command -v sudo >/dev/null 2>&1; then
+    log "Command 'sudo' not found; cannot run Homebrew as non-root user."
+    return 1
+  fi
+
+  # Detect which formula is installed.
+  if sudo -u "$brew_owner" "$brew_bin" list --formula netbirdio/tap/netbird >/dev/null 2>&1; then
+    formula="netbirdio/tap/netbird"
+  elif sudo -u "$brew_owner" "$brew_bin" list --formula netbird >/dev/null 2>&1; then
+    formula="netbird"
+  else
+    log "NetBird formula not found in Homebrew list for user ${brew_owner}; cannot upgrade via Homebrew."
+    return 1
+  fi
+
+  log "Attempting to upgrade NetBird via Homebrew as user '${brew_owner}' using formula '${formula}'..."
+
+  if sudo -u "$brew_owner" "$brew_bin" upgrade "$formula"; then
+    log "Homebrew upgrade of NetBird completed successfully."
+    return 0
+  else
+    log "Homebrew upgrade of NetBird failed."
+    return 1
+  fi
+}
+
 perform_upgrade() {
+  local install_type
+  install_type="$(detect_install_type)"
+  log "Detected NetBird installation type: ${install_type}"
+
   log "Stopping NetBird service (if running)..."
   if command -v netbird >/dev/null 2>&1; then
     netbird service stop >/dev/null 2>&1 || true
   fi
 
-  log "Downloading NetBird installer (install.sh --update)..."
-  local tmpdir="/tmp/netbird-delayed-update"
-  mkdir -p "$tmpdir"
+  if [[ "$install_type" == "brew" ]]; then
+    log "NetBird appears to be installed via Homebrew (Cellar path detected)."
+    if brew_upgrade_netbird; then
+      log "Finished Homebrew-based NetBird upgrade."
+    else
+      log "Homebrew-based NetBird upgrade failed; NetBird version might be unchanged."
+    fi
+  else
+    log "Running NetBird installer (install.sh --update)..."
+    local tmpdir="/tmp/netbird-delayed-update"
+    mkdir -p "$tmpdir"
 
-  (
-    cd "$tmpdir"
-    curl -fsSLO https://pkgs.netbird.io/install.sh
-    chmod +x install.sh
-    ./install.sh --update
-  )
+    (
+      cd "$tmpdir"
+      curl -fsSLO https://pkgs.netbird.io/install.sh
+      chmod +x install.sh
+      ./install.sh --update
+    )
 
-  rm -rf "$tmpdir"
+    rm -rf "$tmpdir"
+  fi
 
   log "Starting NetBird service..."
   if command -v netbird >/dev/null 2>&1; then
