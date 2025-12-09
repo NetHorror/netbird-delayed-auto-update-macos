@@ -154,9 +154,11 @@ self_update_script() {
   fi
 
   local remote_tag
-  remote_tag="$(echo "$json" \
-    | sed -n 's/.*\"tag_name\":[[:space:]]*\"\([0-9]\+\.[0-9]\+\.[0-9]\+\)\".*/\1/p' \
-    | head -n1)"
+  remote_tag="$(
+     printf '%s\n' "$json" \
+       | sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' \
+       | head -n1
+  )"
 
   if [[ -z "$remote_tag" ]]; then
     log "Self-update: cannot parse release tag_name as X.Y.Z; skipping."
