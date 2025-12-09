@@ -15,21 +15,12 @@
 #  - --install / -i: install a launchd daemon that runs this script once per day.
 #  - --uninstall / -u: remove the launchd daemon (optionally also remove state/logs).
 #
-# Parameters:
-#  --delay-days N                How many days a new version must stay unchanged.
-#  --max-random-delay-seconds N  Max random delay (seconds) before check (default: 3600).
-#  --daily-time "HH:MM"          Time of day for launchd StartCalendarInterval (default: 04:00).
-#  --label NAME                  Launchd label (default: io.nethorror.netbird-delayed-update).
-#  -r, --run-at-load             With --install: also run once at boot (RunAtLoad=true).
-#  --remove-state                (with --uninstall) also remove state/log directory.
-#
-# Requirements:
-#  - macOS with launchd
-#  - NetBird already installed (for example via install.sh / pkg / brew)
-#  - root (sudo) for install/uninstall and scheduled runs
-#
 
 set -euo pipefail
+
+# Ensure common Homebrew/bin locations are in PATH (for root / launchd)
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+export PATH
 
 # -------- Config --------
 
@@ -42,6 +33,7 @@ DELAY_DAYS=3
 MAX_RANDOM_DELAY_SECONDS=3600
 DAILY_TIME="04:00"
 TASK_LABEL="io.nethorror.netbird-delayed-update"
+LOG_RETENTION_DAYS=60
 
 MODE="run"
 REMOVE_STATE="false"
@@ -67,6 +59,7 @@ Modes:
 Options:
   --delay-days N                How many days a new version must stay unchanged (default: ${DELAY_DAYS}).
   --max-random-delay-seconds N  Max random delay before check in seconds (default: ${MAX_RANDOM_DELAY_SECONDS}).
+  --log-retention-days N        How many days to keep log files (0 = disable cleanup, default: ${LOG_RETENTION_DAYS}).
   --daily-time "HH:MM"          Time of day when launchd should run the check (default: ${DAILY_TIME}).
   --label NAME                  Launchd label (default: ${TASK_LABEL}).
   -r, --run-at-load             With --install: also run once at boot (RunAtLoad=true).
@@ -109,6 +102,34 @@ ensure_root() {
   fi
 }
 
+cleanup_old_logs() {
+  local days="$LOG_RETENTION_DAYS"
+
+  if [[ -z "$days" ]]; then
+    return 0
+  fi
+
+  if ! [[ "$days" =~ ^[0-9]+$ ]]; then
+    return 0
+  fi
+
+  if (( days <= 0 )); then
+    return 0
+  fi
+
+  if [[ ! -d "$STATE_DIR" ]]; then
+    return 0
+  fi
+
+  local pattern
+  pattern="$(basename "$LOG_PREFIX")-*.log"
+
+  find "$STATE_DIR" -maxdepth 1 -type f -name "$pattern" -mtime +"$days" -print0 2>/dev/null | \
+    while IFS= read -r -d '' f; do
+      rm -f "$f" || true
+    done
+}
+
 # Compare semantic versions: echo -1 if v1<v2, 0 if equal, 1 if v1>v2
 vercmp() {
   local v1="$1" v2="$2"
@@ -141,48 +162,16 @@ version_lt() {
   [[ "$(vercmp "$1" "$2")" -lt 0 ]]
 }
 
-calc_age_days() {
-  local first_seen="$1"
-  if [[ -z "$first_seen" ]]; then
-    echo 0
-    return
-  fi
-  # first_seen is in ISO format: 2025-11-30T14:18:05Z
-  local first_epoch
-  first_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$first_seen" +%s 2>/dev/null || echo 0)
-  if [[ "$first_epoch" -eq 0 ]]; then
-    echo 0
-    return
-  fi
-  local now_epoch
-  now_epoch=$(date -u +%s)
-  echo $(((now_epoch - first_epoch) / 86400))
-}
-
-load_state() {
-  if [[ -f "$STATE_FILE" ]]; then
-    CANDIDATE_VERSION="$(sed -n 's/.*"CandidateVersion":[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" | head -n1 || true)"
-    FIRST_SEEN_UTC="$(sed -n 's/.*"FirstSeenUtc":[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" | head -n1 || true)"
-  else
-    CANDIDATE_VERSION=""
-    FIRST_SEEN_UTC=""
-  fi
-}
-
-save_state() {
-  mkdir -p "$STATE_DIR"
-  cat >"$STATE_FILE" <<EOF
-{
-  "CandidateVersion": "$CANDIDATE_VERSION",
-  "FirstSeenUtc": "$FIRST_SEEN_UTC",
-  "LastCheckUtc": "$NOW_UTC"
-}
-EOF
-}
-
-get_latest_version() {
+# Get latest NetBird version tag (without 'v') from GitHub
+get_latest_github_version() {
+  local url="https://api.github.com/repos/netbirdio/netbird/releases/latest"
   local json
-  json=$(curl -fsSL "https://pkgs.netbird.io/releases/latest" 2>/dev/null || true)
+
+  if ! json="$(curl -fsSL "$url" 2>/dev/null || true)"; then
+    echo ""
+    return
+  fi
+
   if [[ -z "$json" ]]; then
     echo ""
     return
@@ -244,6 +233,8 @@ install_launchd() {
     <string>${DELAY_DAYS}</string>
     <string>--max-random-delay-seconds</string>
     <string>${MAX_RANDOM_DELAY_SECONDS}</string>
+    <string>--log-retention-days</string>
+    <string>${LOG_RETENTION_DAYS}</string>
   </array>
 
   <key>StartCalendarInterval</key>
@@ -299,6 +290,8 @@ run_once() {
   ensure_root
   mkdir -p "$STATE_DIR"
 
+  cleanup_old_logs
+
   LOG_FILE="${LOG_PREFIX}-$(date -u +%Y%m%d-%H%M%S).log"
   NOW_UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
@@ -325,6 +318,14 @@ run_once() {
   fi
 
   log "Local NetBird version: ${local_version}"
+
+  # Get latest version from pkgs.netbird.io
+  get_latest_version() {
+    local url="https://pkgs.netbird.io/latest/version"
+    local v
+    v="$(curl -fsSL "$url" 2>/dev/null || true)"
+    echo "$v"
+  }
 
   local repo_version
   repo_version="$(get_latest_version)"
@@ -378,6 +379,56 @@ run_once() {
   save_state
 }
 
+# -------- State handling --------
+
+calc_age_days() {
+  local first_seen="$1"
+  local now_ts
+  local first_ts
+
+  now_ts=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$NOW_UTC" +%s 2>/dev/null || date -u +%s)
+  first_ts=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$first_seen" +%s 2>/dev/null || date -u +%s)
+
+  local diff=$(( now_ts - first_ts ))
+  if (( diff < 0 )); then
+    diff=0
+  fi
+
+  echo $(( diff / 86400 ))
+}
+
+load_state() {
+  CANDIDATE_VERSION=""
+  FIRST_SEEN_UTC="$NOW_UTC"
+
+  if [[ ! -f "$STATE_FILE" ]]; then
+    return
+  fi
+
+  local json
+  if ! json="$(cat "$STATE_FILE" 2>/dev/null || true)"; then
+    return
+  fi
+
+  if [[ -z "$json" ]]; then
+    return
+  fi
+
+  CANDIDATE_VERSION="$(sed -n 's/.*"CandidateVersion":[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" | head -n1 || true)"
+  FIRST_SEEN_UTC="$(sed -n 's/.*"FirstSeenUtc":[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" | head -n1 || echo "$NOW_UTC")"
+}
+
+save_state() {
+  mkdir -p "$(dirname "$STATE_FILE")"
+  cat >"$STATE_FILE" <<EOF
+{
+  "CandidateVersion": "$CANDIDATE_VERSION",
+  "FirstSeenUtc": "$FIRST_SEEN_UTC",
+  "LastCheckUtc": "$NOW_UTC"
+}
+EOF
+}
+
 # -------- Parse args --------
 
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
@@ -400,6 +451,10 @@ while [[ $# -gt 0 ]]; do
     --max-random-delay-seconds)
       shift
       MAX_RANDOM_DELAY_SECONDS="${1:-$MAX_RANDOM_DELAY_SECONDS}"
+      ;;
+    --log-retention-days)
+      shift
+      LOG_RETENTION_DAYS="${1:-$LOG_RETENTION_DAYS}"
       ;;
     --daily-time)
       shift
