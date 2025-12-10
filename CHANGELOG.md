@@ -1,72 +1,99 @@
-# Changelog
+All notable changes to this project will be documented in this file.
 
-All notable changes to this project will be documented in this file.  
-This project uses semantic versioning (MAJOR.MINOR.PATCH).
+The format is based on Keep a Changelog and the project follows Semantic Versioning.
+
+## [0.1.3] – Unreleased
+
+### Added
+
+- `-as` / `--auto-start` flag:
+
+  - Ensures the NetBird daemon is installed as a system service (`netbird service install`).
+  - Starts the NetBird daemon (`netbird service start`).
+  - Can be used in both one-shot (`run`) mode and together with `--install`.
+
+- `disable_netbird_auto_start()` helper:
+
+  - Stops the NetBird daemon (`netbird service stop`).
+  - Uninstalls the NetBird daemon service (`netbird service uninstall`).
+
+### Changed
+
+- `--uninstall` mode now:
+
+  - Unloads and removes the launchd plist.
+  - Always attempts to remove the NetBird system auto-start by calling
+    `disable_netbird_auto_start()`.
+
+- README and release notes:
+
+  - Quick start explicitly uses `--install -r` for better laptop behaviour.
+  - `--delay-days` default is documented as `10` days.
+  - Auto-start behaviour (`-as` and `--uninstall`) is described in more detail.
 
 ## [0.1.2] – 2025-12-09
 
 ### Added
 
-- **Support for multiple NetBird installation types on macOS**:
-  - Detects whether `netbird` comes from Homebrew (`.../Cellar/netbird/...`) or from a pkg/app installation (`/Applications/NetBird.app/...` symlinked from `/usr/local/bin/netbird`), or from a custom location.
-  - For Homebrew-based installations:
-    - determines the owner user of the `brew` binary;
-    - runs `brew upgrade` as that user to update either `netbirdio/tap/netbird` or `netbird`, depending on which formula is installed.
-  - For pkg/app installations:
-    - resolves the latest macOS installer URL from `https://pkgs.netbird.io/macos/<arch>`;
-    - downloads the `.pkg` and installs it via the macOS `installer` tool.
-  - In all cases the NetBird service is stopped before the upgrade and restarted afterwards.
+- Homebrew-aware upgrade:
 
-- **Log retention**:
-  - New option: `--log-retention-days` (default: `60`).
-  - Log files `netbird-delayed-update-*.log` in `/var/lib/netbird-delayed-update/` older than the configured number of days are removed on each run.
-  - `--log-retention-days 0` disables log cleanup.
+  - Detects whether NetBird is installed via Homebrew.
+  - Runs `brew upgrade` as the Homebrew owner user.
+  - Supports both `netbirdio/tap/netbird` and `netbird` formulas.
 
-- **Script self-update**:
-  - Queries the latest GitHub release of `NetHorror/netbird-delayed-auto-update-macos`.
-  - Parses the release tag (`X.Y.Z`) and compares it to `SCRIPT_VERSION` (`0.1.2`).
-  - If a newer version exists:
-    - tries `git pull --ff-only` when the script lives inside a git repository;
-    - otherwise downloads `netbird-delayed-update-macos.sh` from the tagged version on `raw.githubusercontent.com` and overwrites the local file.
-  - The new script is used on the next run.
+- macOS pkg-based upgrade:
+
+  - Detects standard GUI/pkg installations.
+  - Downloads and installs the latest macOS `.pkg` from `pkgs.netbird.io`.
+  - Restarts the NetBird service after upgrade.
+
+- Script self-update:
+
+  - Checks the latest GitHub release of this repository.
+  - Downloads and replaces the local script when a newer version is available.
+
+- Log retention:
+
+  - Per-run logs are written to `/var/lib/netbird-delayed-update/netbird-delayed-update-*.log`.
+  - `--log-retention-days` controls how long logs are kept.
 
 ### Changed
 
-- **Version detection**:
-  - Latest NetBird version is obtained from `https://pkgs.netbird.io/releases/latest`.
-  - The script extracts a `vX.Y.Z` tag from the JSON response, normalises it to `X.Y.Z` and compares it with the local version from `netbird version`.
+- Refined delayed rollout / aging logic and version detection.
+- Improved state handling and robustness when `state.json` is missing or malformed.
 
-- **Age calculation**:
-  - Age (in days) between `FirstSeenUtc` and the current time is clamped to a minimum of `0` days to avoid negative values if system time moves backwards.
-  - The delayed rollout logic uses the clamped value.
-
-### Fixed
-
-- Removed reliance on `install.sh --update` on macOS, which refused to update pkg-based installations.
-- Ensured that both Homebrew and pkg-based NetBird installations can be upgraded automatically by the script.
-
----
-
-## [0.1.1] – 2025-12-08
-
-### Fixed
-
-- Ensured `netbird` CLI is visible when the script is run as root via launchd:
-  - Extended `PATH` to include `/opt/homebrew/bin` and `/usr/local/bin`.
-  - Prevented the script from incorrectly logging `netbird CLI not found in PATH` when NetBird is actually installed.
-
----
-
-## [0.1.0] – 2025-12-08
+## [0.1.1] – 2025-11-30
 
 ### Added
 
-- Initial delayed auto-update implementation for NetBird on macOS:
-  - Queries local version via `netbird version`.
-  - Queries latest available version and treats it as a "candidate".
-  - Stores candidate version and first-seen timestamp in `/var/lib/netbird-delayed-update/state.json`.
-  - Only upgrades once the candidate has "aged" for at least `--delay-days` days.
-- Launchd integration:
-  - `--install` / `--uninstall` to create/remove a root launchd daemon.
-  - Daily schedule at a configurable time (`--daily-time`).
-- Basic logging to `/var/lib/netbird-delayed-update/netbird-delayed-update-*.log`.
+- `-r` / `--run-at-load` flag for install mode:
+
+  - When used with `--install`, sets `RunAtLoad=true` in the launchd plist.
+  - Ensures a run happens at boot if the scheduled time was missed (e.g. laptop was off).
+
+### Changed
+
+- Improved launchd friendliness:
+
+  - Ensured `/opt/homebrew/bin` and `/usr/local/bin` are included in `PATH` when running
+    under launchd as root.
+  - Updated README with clearer installation and testing steps.
+
+## [0.1.0] – 2025-11-30
+
+### Added
+
+- Initial implementation of delayed NetBird auto-update for macOS:
+
+  - Daily launchd job that checks for new NetBird versions at a configured time.
+  - Version aging: candidate version must stay unchanged for a configurable number of days
+    (`--delay-days`) before rollout.
+  - Optional random jitter (`--max-random-delay-seconds`) to spread task execution.
+  - State tracking in `/var/lib/netbird-delayed-update/state.json`.
+  - Detailed per-run logs in `/var/lib/netbird-delayed-update/`.
+  - Single script responsible for:
+    - `--install` / `-i` (install LaunchDaemon),
+    - `--uninstall` / `-u` (remove LaunchDaemon),
+    - run mode (delayed-update logic).
+
+---
