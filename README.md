@@ -11,8 +11,6 @@ or broken releases that get replaced quickly will never reach your machines.
 The script supports both Homebrew-based NetBird installs and the official macOS `.pkg` installer,
 and can optionally ensure that the NetBird daemon starts before any user logon.
 
-Current script version: **0.1.3** (unreleased, trunk).
-
 ## Features
 
 - **Delayed rollout window**
