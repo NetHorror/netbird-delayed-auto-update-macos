@@ -2,6 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) ![Platform: macOS](https://img.shields.io/badge/platform-macOS-informational) ![Init: launchd](https://img.shields.io/badge/init-launchd-blue) ![Shell: bash](https://img.shields.io/badge/shell-bash-green)
 
+
 This project provides a delayed (staged) auto-update mechanism for the NetBird client on macOS.
 
 Instead of upgrading immediately when a new version is published, the script waits until the same
@@ -9,7 +10,10 @@ version has been available in the upstream repository for a configurable number 
 or broken releases that get replaced quickly will never reach your machines.
 
 The script supports both Homebrew-based NetBird installs and the official macOS `.pkg` installer,
-and can optionally ensure that the NetBird daemon starts before any user logon.
+and can optionally ensure that the NetBird daemon starts before any user logon (with an important
+limitation when full-disk encryption / FileVault is enabled, see below).
+
+Current script version: **0.1.3**.
 
 ## Features
 
@@ -40,9 +44,12 @@ and can optionally ensure that the NetBird daemon starts before any user logon.
 - **NetBird daemon auto-start before logon**
 
   - `-as` / `--auto-start` ensures the NetBird daemon is installed as a system service and started
-    so that connectivity is available before anyone logs in.
+    so that connectivity is available before any user logs in.
   - `-u` / `--uninstall` also stops and uninstalls the NetBird daemon service to remove system
     auto-start.
+  - **Important:** on systems with full-disk encryption (FileVault) enabled, NetBird cannot start
+    before the disk is unlocked at the FileVault login screen. See _“Limitations with FileVault /
+    full-disk encryption”_ below.
 
 - **Self-updating helper**
 
@@ -60,7 +67,10 @@ and can optionally ensure that the NetBird daemon starts before any user logon.
 
 ## Quick start
 
-This is the shortest way to get a daily delayed-update job running with reasonable defaults:
+This is the shortest way to get a daily delayed-update job running with reasonable defaults.
+
+> **Note:** this assumes macOS is already fully booted. On hosts with FileVault enabled you must
+> unlock the disk at the FileVault prompt first; no VPN or launchd service can run *before* that.
 
 1. Clone the repository (or copy the script):
 
@@ -73,7 +83,7 @@ This is the shortest way to get a daily delayed-update job running with reasonab
 2. Install the LaunchDaemon with default schedule **and** `RunAtLoad` enabled:
 
    ~~~bash
-   sudo ./netbird-delayed-update-macos.sh --install -r
+   sudo ./netbird-delayed-update-macos.sh --install --run-at-load
    ~~~
 
    This will:
@@ -82,12 +92,12 @@ This is the shortest way to get a daily delayed-update job running with reasonab
    - Schedule a daily run at `04:00` (system time).
    - Allow a random jitter of up to `3600` seconds before each check.
    - Keep logs for `60` days.
-   - Run the job once at boot as well (because of `-r`), in case the machine was off at 04:00.
+   - Run the job once at boot as well (because of `--run-at-load`), in case the machine was off at 04:00.
 
-3. (Optional) Ensure NetBird daemon starts before user logon:
+3. (Optional) Ensure NetBird daemon starts before user logon (once macOS has booted):
 
    ~~~bash
-   sudo ./netbird-delayed-update-macos.sh --install -r --auto-start
+   sudo ./netbird-delayed-update-macos.sh --install --run-at-load --auto-start
    ~~~
 
    In addition to the LaunchDaemon installation, this will:
@@ -126,7 +136,7 @@ If you prefer to place the script into a system-wide directory (e.g. `/usr/local
 3. To install the daily LaunchDaemon from that location:
 
    ~~~bash
-   sudo /usr/local/sbin/netbird-delayed-update-macos.sh --install -r
+   sudo /usr/local/sbin/netbird-delayed-update-macos.sh --install --run-at-load
    ~~~
 
 ---
@@ -138,7 +148,7 @@ If you prefer to place the script into a system-wide directory (e.g. `/usr/local
 When you run:
 
 ~~~bash
-sudo ./netbird-delayed-update-macos.sh --install -r
+sudo ./netbird-delayed-update-macos.sh --install --run-at-load
 ~~~
 
 the following defaults are used:
@@ -154,7 +164,7 @@ the following defaults are used:
 You can override any of the defaults when installing the daemon:
 
 ~~~bash
-sudo ./netbird-delayed-update-macos.sh --install -r \
+sudo ./netbird-delayed-update-macos.sh --install --run-at-load \
   --delay-days 10 \
   --max-random-delay-seconds 1800 \
   --log-retention-days 30 \
@@ -172,7 +182,7 @@ The script can optionally manage the NetBird daemon service for you.
 
 ### Enabling auto-start (`-as` / `--auto-start`)
 
-- In **run mode**, using `-as` will ensure the NetBird daemon service is installed and started:
+- In **run mode**, using `--auto-start` will ensure the NetBird daemon service is installed and started:
 
   ~~~bash
   sudo ./netbird-delayed-update-macos.sh --auto-start
@@ -181,7 +191,7 @@ The script can optionally manage the NetBird daemon service for you.
 - In **install mode**, combining `--install` and `--auto-start`:
 
   ~~~bash
-  sudo ./netbird-delayed-update-macos.sh --install -r --auto-start
+  sudo ./netbird-delayed-update-macos.sh --install --run-at-load --auto-start
   ~~~
 
   will:
@@ -231,6 +241,33 @@ This will:
 - Self-update the script (if a newer release exists).
 - Ensure NetBird daemon auto-start is configured (`--auto-start`).
 - Perform the delayed rollout logic and upgrade NetBird when conditions are met.
+
+---
+
+## Limitations with FileVault / full-disk encryption
+
+If **FileVault (full-disk encryption)** is enabled on the Mac:
+
+- After a cold boot or reboot, the system shows the FileVault password screen.
+- Until the disk is unlocked at that screen:
+  - the main system volume is encrypted,
+  - macOS is not fully running,
+  - `launchd` and system services are not started,
+  - **no VPN or NetBird daemon can run**, regardless of `--auto-start`, Wi-Fi or LAN.
+
+This means:
+
+- The script **cannot** guarantee remote access via NetBird immediately after a cold boot or
+  reboot on a FileVault-encrypted system.
+- NetBird and this script only start working **after** someone unlocks the disk at the FileVault
+  prompt and macOS finishes booting.
+
+If you need true “headless server” behaviour (NetBird available after power-on / reboot without
+local interaction), you must either:
+
+- run on a machine without full-disk encryption, or
+- keep the machine running and use sleep/hibernate instead of full reboots, making sure the disk is
+  already unlocked and NetBird daemon is running before it goes to sleep.
 
 ---
 
