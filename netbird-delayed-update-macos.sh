@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 0.1.2
+# Version: 0.1.3
 #
 # NetBird Delayed Auto-Update for macOS
 #
@@ -24,16 +24,19 @@ DAILY_TIME="04:00"
 TASK_LABEL="io.nethorror.netbird-delayed-update"
 LOG_RETENTION_DAYS=60
 
+AUTO_START="false"
+
 # Script self-update
-SCRIPT_VERSION="0.1.2"
+SCRIPT_VERSION="0.1.3"
 SELFUPDATE_REPO="NetHorror/netbird-delayed-auto-update-macos"
 SELFUPDATE_PATH="netbird-delayed-update-macos.sh"
 
-MODE="run"
-REMOVE_STATE="false"
-RUN_AT_LOAD="false"
+# -------------------- Global runtime state --------------------
 
-SCRIPT_PATH=""
+MODE="run"
+RUN_AT_LOAD="false"
+REMOVE_STATE="false"
+
 LOG_FILE=""
 NOW_UTC=""
 
@@ -50,7 +53,7 @@ Usage:
 
 Modes:
   -i, --install           Install launchd daemon (daily check).
-  -u, --uninstall         Uninstall launchd daemon.
+  -u, --uninstall         Uninstall launchd daemon and remove NetBird daemon auto-start.
       (no mode)           Run a single delayed-update check.
 
 Options:
@@ -59,6 +62,7 @@ Options:
   --log-retention-days N        How many days to keep log files (0 = disable cleanup, default: ${LOG_RETENTION_DAYS}).
   --daily-time "HH:MM"          Time of day when launchd should run the check (default: ${DAILY_TIME}).
   --label NAME                  Launchd label (default: ${TASK_LABEL}).
+  -as, --auto-start             Ensure NetBird daemon is installed & auto-starts before user logon.
   -r, --run-at-load             With --install: also run once at boot (RunAtLoad=true).
   --remove-state                With --uninstall: also remove ${STATE_DIR}.
   -h, --help                    Show this help.
@@ -76,156 +80,74 @@ log() {
   local msg="$1"
   local ts
   ts="$(date -u +"%Y-%m-%d %H:%M:%S")"
-  echo "[$ts] $msg" | tee -a "$LOG_FILE"
+  if [[ -n "${LOG_FILE:-}" ]]; then
+    echo "[$ts] $msg" | tee -a "$LOG_FILE"
+  else
+    echo "[$ts] $msg"
+  fi
 }
 
 cleanup_old_logs() {
-  local days="$LOG_RETENTION_DAYS"
-
-  if [[ -z "$days" ]]; then
-    return 0
-  fi
-  if ! [[ "$days" =~ ^[0-9]+$ ]]; then
-    return 0
-  fi
-  if (( days <= 0 )); then
-    return 0
-  fi
-  if [[ ! -d "$STATE_DIR" ]]; then
-    return 0
+  mkdir -p "$STATE_DIR"
+  if (( LOG_RETENTION_DAYS <= 0 )); then
+    return
   fi
 
-  local pattern
-  pattern="$(basename "$LOG_PREFIX")-*.log"
-
-  find "$STATE_DIR" -maxdepth 1 -type f -name "$pattern" -mtime +"$days" -print0 2>/dev/null | \
-    while IFS= read -r -d '' f; do
-      rm -f "$f" || true
-    done
+  find "$STATE_DIR" -type f -name "netbird-delayed-update-*.log" \
+    -mtime "+$LOG_RETENTION_DAYS" -print -delete 2>/dev/null || true
 }
 
-# Compare semantic versions: echo -1 if v1<v2, 0 if equal, 1 if v1>v2
-vercmp() {
-  local v1="$1" v2="$2"
+version_cmp() {
+  # returns: 0 if equal, 1 if v1>v2, 2 if v1<v2
+  local v1="$1"
+  local v2="$2"
+
+  if [[ "$v1" == "$v2" ]]; then
+    echo 0
+    return
+  fi
+
   local IFS=.
   local i
-  local -a a1 a2
+  local v1_parts=($v1)
+  local v2_parts=($v2)
 
-  read -ra a1 <<< "$v1"
-  read -ra a2 <<< "$v2"
-
-  local len="${#a1[@]}"
-  [[ ${#a2[@]} -gt $len ]] && len="${#a2[@]}"
+  local len=${#v1_parts[@]}
+  if (( ${#v2_parts[@]} > len )); then
+    len=${#v2_parts[@]}
+  fi
 
   for ((i=0; i<len; i++)); do
-    local n1="${a1[i]:-0}"
-    local n2="${a2[i]:-0}"
-    if ((10#$n1 < 10#$n2)); then
-      echo -1
-      return 0
-    fi
-    if ((10#$n1 > 10#$n2)); then
+    local a=${v1_parts[i]:-0}
+    local b=${v2_parts[i]:-0}
+    if (( a > b )); then
       echo 1
-      return 0
+      return
+    elif (( a < b )); then
+      echo 2
+      return
     fi
   done
+
   echo 0
 }
 
 version_lt() {
-  [[ "$(vercmp "$1" "$2")" -lt 0 ]]
+  local v1="$1"
+  local v2="$2"
+  local cmp
+  cmp="$(version_cmp "$v1" "$v2")"
+  [[ "$cmp" -eq 2 ]]
 }
-
-# -------------------- Script self-update --------------------
-
-self_update_script() {
-  if [[ -z "$SELFUPDATE_REPO" ]]; then
-    return 0
-  fi
-
-  local api_url="https://api.github.com/repos/${SELFUPDATE_REPO}/releases/latest"
-  log "Self-update: checking latest script release at ${api_url}"
-
-  local json
-  json="$(curl -fsSL "$api_url" 2>/dev/null || true)"
-  if [[ -z "$json" ]]; then
-    log "Self-update: failed to query GitHub releases (empty response)."
-    return 0
-  fi
-
-  local remote_tag
-  remote_tag="$(
-     printf '%s\n' "$json" \
-       | sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' \
-       | head -n1
-  )"
-
-  if [[ -z "$remote_tag" ]]; then
-    log "Self-update: cannot parse release tag_name as X.Y.Z; skipping."
-    return 0
-  fi
-
-  log "Self-update: local script version ${SCRIPT_VERSION}, latest release ${remote_tag}"
-
-  if [[ "$(vercmp "$SCRIPT_VERSION" "$remote_tag")" -ge 0 ]]; then
-    log "Self-update: script is up to date."
-    return 0
-  fi
-
-  log "Self-update: newer script version available."
-
-  if command -v git >/dev/null 2>&1; then
-    local repo_dir
-    repo_dir="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
-    while [[ "$repo_dir" != "/" && ! -d "${repo_dir}/.git" ]]; do
-      repo_dir="$(dirname "$repo_dir")"
-    done
-    if [[ -d "${repo_dir}/.git" ]]; then
-      log "Self-update: running 'git pull --ff-only' in ${repo_dir}"
-      if git -C "$repo_dir" pull --ff-only; then
-        log "Self-update: git pull completed. New script will be used on next run."
-        return 0
-      else
-        log "Self-update: git pull failed; falling back to raw download."
-      fi
-    else
-      log "Self-update: script is not inside a git repository."
-    fi
-  else
-    log "Self-update: git not found in PATH."
-  fi
-
-  local raw_url="https://raw.githubusercontent.com/${SELFUPDATE_REPO}/${remote_tag}/${SELFUPDATE_PATH}"
-  log "Self-update: downloading script from ${raw_url}"
-
-  local tmp
-  tmp="$(mktemp "/tmp/netbird-delayed-update-macos.XXXXXX")" || {
-    log "Self-update: failed to create temporary file."
-    return 0
-  }
-
-  if ! curl -fsSL "$raw_url" -o "$tmp" 2>/dev/null; then
-    log "Self-update: failed to download script from raw GitHub."
-    rm -f "$tmp" || true
-    return 0
-  fi
-
-  if ! cp "$tmp" "$SCRIPT_PATH"; then
-    log "Self-update: failed to overwrite local script."
-    rm -f "$tmp" || true
-    return 0
-  fi
-
-  chmod +x "$SCRIPT_PATH" || true
-  rm -f "$tmp" || true
-
-  log "Self-update: script updated from raw GitHub. New version will be used on next run."
-}
-
-# -------------------- State handling --------------------
 
 calc_age_days() {
   local first_seen="$1"
+
+  if [[ -z "$first_seen" ]]; then
+    echo 0
+    return
+  fi
+
   local now_ts
   local first_ts
 
@@ -241,35 +163,34 @@ calc_age_days() {
 }
 
 load_state() {
-  CANDIDATE_VERSION=""
-  FIRST_SEEN_UTC="$NOW_UTC"
-
   if [[ ! -f "$STATE_FILE" ]]; then
+    CANDIDATE_VERSION=""
+    FIRST_SEEN_UTC=""
     return
   fi
 
   local json
   json="$(cat "$STATE_FILE" 2>/dev/null || true)"
   if [[ -z "$json" ]]; then
+    CANDIDATE_VERSION=""
+    FIRST_SEEN_UTC=""
     return
   fi
 
-  CANDIDATE_VERSION="$(echo "$json" | sed -n 's/.*\"CandidateVersion\":[[:space:]]*\"\([^"]*\)\".*/\1/p' | head -n1 || true)"
-  FIRST_SEEN_UTC="$(echo "$json" | sed -n 's/.*\"FirstSeenUtc\":[[:space:]]*\"\([^"]*\)\".*/\1/p' | head -n1 || echo "$NOW_UTC")"
+  CANDIDATE_VERSION="$(printf '%s\n' "$json" | sed -nE 's/.*\"candidate_version\"[[:space:]]*:[[:space:]]*\"([^"]*)\".*/\1/p' | head -n1)"
+  FIRST_SEEN_UTC="$(printf '%s\n' "$json" | sed -nE 's/.*\"first_seen_utc\"[[:space:]]*:[[:space:]]*\"([^"]*)\".*/\1/p' | head -n1)"
 }
 
 save_state() {
-  mkdir -p "$(dirname "$STATE_FILE")"
+  mkdir -p "$STATE_DIR"
+
   cat >"$STATE_FILE" <<EOF
 {
-  "CandidateVersion": "$CANDIDATE_VERSION",
-  "FirstSeenUtc": "$FIRST_SEEN_UTC",
-  "LastCheckUtc": "$NOW_UTC"
+  "candidate_version": "${CANDIDATE_VERSION}",
+  "first_seen_utc": "${FIRST_SEEN_UTC}"
 }
 EOF
 }
-
-# -------------------- NetBird upgrade logic --------------------
 
 get_latest_netbird_version() {
   local url="https://pkgs.netbird.io/releases/latest"
@@ -312,26 +233,69 @@ detect_install_type() {
     fi
   fi
 
-  if [[ "$target" == *"/Cellar/netbird/"* ]]; then
-    echo "brew"
-  else
-    echo "other"
+  case "$target" in
+    *Homebrew/*|*/brew/Cellar/*|*/opt/homebrew/*|*/usr/local/Cellar/*)
+      echo "brew"
+      ;;
+    *)
+      echo "pkg"
+      ;;
+  esac
+}
+
+find_brew_binary_and_owner() {
+  local brew_bin
+  brew_bin="$(command -v brew 2>/dev/null || true)"
+  if [[ -z "$brew_bin" ]]; then
+    log "Homebrew not found in PATH."
+    return 1
   fi
+
+  local brew_owner
+  brew_owner="$(stat -f "%Su" "$brew_bin" 2>/dev/null || stat -c "%U" "$brew_bin" 2>/dev/null || true)"
+  if [[ -z "$brew_owner" ]]; then
+    log "Failed to determine Homebrew binary owner."
+    return 1
+  fi
+
+  echo "$brew_bin:$brew_owner"
 }
 
 brew_upgrade_netbird() {
-  local brew_bin brew_owner formula
+  local info
+  info="$(find_brew_binary_and_owner)" || return 1
 
-  brew_bin="$(command -v brew 2>/dev/null || true)"
-  if [[ -z "$brew_bin" ]]; then
-    log "Homebrew binary 'brew' not found in PATH; cannot upgrade NetBird via Homebrew."
+  local brew_bin="${info%%:*}"
+  local brew_owner="${info#*:}"
+
+  log "Using Homebrew at ${brew_bin}, owner=${brew_owner}"
+
+  if ! id -u "$brew_owner" >/dev/null 2>&1; then
+    log "Homebrew owner user ${brew_owner} does not exist."
     return 1
   fi
 
-  brew_owner="$(stat -f "%Su" "$brew_bin" 2>/dev/null || true)"
-  if [[ -z "$brew_owner" ]]; then
-    log "Failed to determine Homebrew owner user; cannot upgrade NetBird via Homebrew."
-    return 1
+  if [[ "$EUID" -eq 0 && "$brew_owner" == "root" ]]; then
+    # Homebrew is owned by root; just run it directly
+    if ! "$brew_bin" update; then
+      log "Homebrew update failed."
+      return 1
+    fi
+
+    if "$brew_bin" list --formula netbirdio/tap/netbird >/dev/null 2>&1; then
+      formula="netbirdio/tap/netbird"
+    elif "$brew_bin" list --formula netbird >/dev/null 2>&1; then
+      formula="netbird"
+    else
+      log "NetBird formula not found in Homebrew list."
+      return 1
+    fi
+
+    if ! "$brew_bin" upgrade "$formula"; then
+      log "Homebrew upgrade for formula ${formula} failed."
+      return 1
+    fi
+    return 0
   fi
 
   if ! command -v sudo >/dev/null 2>&1; then
@@ -348,48 +312,50 @@ brew_upgrade_netbird() {
     return 1
   fi
 
-  log "Attempting to upgrade NetBird via Homebrew as user '${brew_owner}' using formula '${formula}'..."
+  log "Found NetBird formula ${formula} for user ${brew_owner}. Running Homebrew update & upgrade..."
 
-  if sudo -u "$brew_owner" "$brew_bin" upgrade "$formula"; then
-    log "Homebrew upgrade of NetBird completed successfully."
-    return 0
-  else
-    log "Homebrew upgrade of NetBird failed."
+  if ! sudo -u "$brew_owner" "$brew_bin" update; then
+    log "Homebrew update failed (as ${brew_owner})."
     return 1
   fi
+
+  if ! sudo -u "$brew_owner" "$brew_bin" upgrade "$formula"; then
+    log "Homebrew upgrade for formula ${formula} failed (as ${brew_owner})."
+    return 1
+  fi
+
+  return 0
 }
 
 install_mac_pkg_direct() {
-  local arch
-  case "$(uname -m)" in
-    x86_64) arch="amd64" ;;
-    arm64|aarch64) arch="arm64" ;;
-    *)
-      log "Unsupported macOS arch: $(uname -m)"
-      return 1
-      ;;
-  esac
-
-  local pkg_url
-  pkg_url="$(curl -sIL -o /dev/null -w '%{url_effective}' "https://pkgs.netbird.io/macos/${arch}" 2>/dev/null || true)"
-  if [[ -z "$pkg_url" ]]; then
-    log "Failed to determine NetBird macOS installer URL."
+  local latest_version
+  latest_version="$(get_latest_netbird_version)"
+  if [[ -z "$latest_version" ]]; then
+    log "Could not determine latest NetBird version from pkgs.netbird.io (macOS pkg)."
     return 1
   fi
 
-  log "Downloading NetBird macOS installer from https://pkgs.netbird.io/macos/${arch}"
-  if ! curl -fsSL -o /tmp/netbird.pkg "$pkg_url"; then
-    log "Failed to download NetBird macOS installer."
+  log "Latest NetBird macOS pkg version: ${latest_version}"
+
+  local pkg_url="https://pkgs.netbird.io/macos/netbird-${latest_version}.pkg"
+  local tmp_pkg
+  tmp_pkg="$(mktemp "/tmp/netbird-${latest_version}.pkg.XXXXXX")"
+
+  log "Downloading NetBird pkg from ${pkg_url} to ${tmp_pkg}..."
+  if ! curl -fsSL -o "$tmp_pkg" "$pkg_url"; then
+    log "Failed to download NetBird pkg from ${pkg_url}"
+    rm -f "$tmp_pkg"
     return 1
   fi
 
-  if ! installer -pkg /tmp/netbird.pkg -target /; then
-    log "Failed to run macOS installer."
-    rm -f /tmp/netbird.pkg || true
+  log "Running installer for ${tmp_pkg}..."
+  if ! /usr/sbin/installer -pkg "$tmp_pkg" -target /; then
+    log "Installer failed for pkg ${tmp_pkg}"
+    rm -f "$tmp_pkg"
     return 1
   fi
 
-  rm -f /tmp/netbird.pkg || true
+  rm -f "$tmp_pkg"
   log "macOS pkg installation completed."
   return 0
 }
@@ -422,6 +388,118 @@ perform_upgrade() {
   fi
 }
 
+ensure_netbird_auto_start() {
+  if [[ "$AUTO_START" != "true" ]]; then
+    return 0
+  fi
+
+  if ! command -v netbird >/dev/null 2>&1; then
+    log "Auto-start: 'netbird' CLI not found in PATH; skipping auto-start configuration."
+    return 0
+  fi
+
+  log "Auto-start: ensuring NetBird daemon service is installed for system boot..."
+  if ! netbird service install >/dev/null 2>&1; then
+    log "Auto-start: 'netbird service install' failed or service is already installed."
+  else
+    log "Auto-start: 'netbird service install' completed successfully."
+  fi
+
+  log "Auto-start: starting NetBird daemon service..."
+  if ! netbird service start >/dev/null 2>&1; then
+    log "Auto-start: 'netbird service start' failed or service is already running."
+  else
+    log "Auto-start: 'netbird service start' executed successfully."
+  fi
+}
+
+disable_netbird_auto_start() {
+  if ! command -v netbird >/dev/null 2>&1; then
+    log "Auto-start removal: 'netbird' CLI not found in PATH; skipping NetBird daemon cleanup."
+    return 0
+  fi
+
+  log "Auto-start removal: stopping NetBird daemon service (if running)..."
+  netbird service stop >/dev/null 2>&1 || log "Auto-start removal: 'netbird service stop' failed or service not running."
+
+  log "Auto-start removal: uninstalling NetBird daemon service (removing system auto-start)..."
+  if ! netbird service uninstall >/dev/null 2>&1; then
+    log "Auto-start removal: 'netbird service uninstall' failed or service is not installed."
+  else
+    log "Auto-start removal: NetBird daemon service uninstalled."
+  fi
+}
+
+self_update_script() {
+  local api_url="https://api.github.com/repos/${SELFUPDATE_REPO}/releases/latest"
+  log "Self-update: checking latest script release at ${api_url}"
+
+  local json
+  json="$(curl -fsSL "$api_url" 2>/dev/null || true)"
+  if [[ -z "$json" ]]; then
+    log "Self-update: failed to query GitHub releases (empty response)."
+    return 0
+  fi
+
+  local remote_tag
+  remote_tag="$(
+     printf '%s\n' "$json" \
+       | sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' \
+       | head -n1
+  )"
+
+  if [[ -z "$remote_tag" ]]; then
+    log "Self-update: could not parse remote tag_name from GitHub."
+    return 0
+  fi
+
+  log "Self-update: current script version ${SCRIPT_VERSION}, remote version ${remote_tag}"
+
+  if ! version_lt "$SCRIPT_VERSION" "$remote_tag"; then
+    log "Self-update: local script is up to date (or newer than the latest release)."
+    return 0
+  fi
+
+  local script_url
+  script_url="$(
+    printf '%s\n' "$json" \
+      | sed -nE "s#.*\"browser_download_url\"[[:space:]]*:[[:space:]]*\"([^\"]*${SELFUPDATE_PATH})\".*#\1#p" \
+      | head -n1
+  )"
+
+  if [[ -z "$script_url" ]]; then
+    log "Self-update: failed to find browser_download_url for ${SELFUPDATE_PATH} in latest release. Skipping."
+    return 0
+  fi
+
+  log "Self-update: downloading updated script from ${script_url}"
+
+  local tmp_file
+  tmp_file="$(mktemp "/tmp/netbird-delayed-update-selfupdate.XXXXXX")"
+
+  if ! curl -fsSL -o "$tmp_file" "$script_url"; then
+    log "Self-update: download failed. Keeping existing script."
+    rm -f "$tmp_file"
+    return 0
+  fi
+
+  chmod +x "$tmp_file"
+
+  local current_path
+  current_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+  if [[ ! -w "$current_path" ]]; then
+    log "Self-update: cannot overwrite ${current_path} (not writable). Skipping self-update."
+    rm -f "$tmp_file"
+    return 0
+  fi
+
+  log "Self-update: replacing ${current_path} with new version."
+  mv "$tmp_file" "$current_path"
+
+  log "Self-update: script updated to version ${remote_tag}. Please re-run the script to use the new version."
+}
+
 run_once() {
   ensure_root
   mkdir -p "$STATE_DIR"
@@ -435,26 +513,23 @@ run_once() {
 
   self_update_script
 
+  ensure_netbird_auto_start
+
   if (( MAX_RANDOM_DELAY_SECONDS > 0 )); then
     local delay
     delay=$(( RANDOM % (MAX_RANDOM_DELAY_SECONDS + 1) ))
-    log "Random delay before check: ${delay} seconds."
+    log "Random delay before check: ${delay} seconds"
     sleep "$delay"
-  else
-    log "Random delay disabled (MaxRandomDelaySeconds=0)."
   fi
 
-  if ! command -v netbird >/dev/null 2>&1; then
-    log "netbird CLI not found in PATH. Nothing to do."
-    return 0
-  fi
+  log "Collecting NetBird version info..."
 
   local local_version
   local_version="$(netbird version 2>/dev/null | tr -d '[:space:]' || true)"
 
   if [[ -z "$local_version" ]]; then
-    log "Could not determine local NetBird version. Aborting."
-    return 1
+    log "NetBird does not appear to be installed or 'netbird version' failed."
+    return 0
   fi
 
   log "Local NetBird version: ${local_version}"
@@ -469,7 +544,7 @@ run_once() {
 
   log "Latest NetBird version from repository: ${repo_version}"
 
-  load_state
+  load_state()
 
   if [[ -z "$CANDIDATE_VERSION" || "$CANDIDATE_VERSION" != "$repo_version" ]]; then
     CANDIDATE_VERSION="$repo_version"
@@ -510,8 +585,6 @@ run_once() {
   save_state
 }
 
-# -------------------- launchd integration --------------------
-
 install_launchd() {
   ensure_root
   mkdir -p "$STATE_DIR"
@@ -528,6 +601,9 @@ install_launchd() {
     run_at_load_tag="<false/>"
   fi
 
+  local script_path
+  script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
   cat >"$plist_path" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -538,7 +614,7 @@ install_launchd() {
 
   <key>ProgramArguments</key>
   <array>
-    <string>${SCRIPT_PATH}</string>
+    <string>${script_path}</string>
     <string>--delay-days</string>
     <string>${DELAY_DAYS}</string>
     <string>--max-random-delay-seconds</string>
@@ -566,33 +642,41 @@ install_launchd() {
 </plist>
 EOF
 
-  chown root:wheel "$plist_path"
   chmod 644 "$plist_path"
+  chown root:wheel "$plist_path"
+
+  log "Launchd plist installed at ${plist_path}. Loading daemon..."
 
   launchctl unload "$plist_path" >/dev/null 2>&1 || true
   launchctl load "$plist_path"
 
-  echo "Installed launchd job: ${TASK_LABEL}"
-  echo "Plist: ${plist_path}"
-  echo "State/logs: ${STATE_DIR}"
+  log "Launchd daemon ${TASK_LABEL} installed and loaded."
 }
 
 uninstall_launchd() {
   ensure_root
+
   local plist_path="${LAUNCHD_DIR}/${TASK_LABEL}.plist"
 
   if [[ -f "$plist_path" ]]; then
+    log "Unloading launchd daemon ${TASK_LABEL}..."
     launchctl unload "$plist_path" >/dev/null 2>&1 || true
+
+    log "Removing plist ${plist_path}..."
     rm -f "$plist_path"
-    echo "Removed launchd job: ${TASK_LABEL}"
   else
-    echo "Launchd plist not found: ${plist_path}"
+    log "Launchd plist ${plist_path} not found; nothing to remove."
   fi
 
+  # Always attempt to remove NetBird system auto-start (daemon service)
+  disable_netbird_auto_start
+
   if [[ "$REMOVE_STATE" == "true" ]]; then
+    log "Removing state directory ${STATE_DIR}..."
     rm -rf "$STATE_DIR"
-    echo "Removed state/log directory: ${STATE_DIR}"
   fi
+
+  log "Launchd daemon ${TASK_LABEL} uninstalled."
 }
 
 # -------------------- Argument parsing --------------------
@@ -630,6 +714,9 @@ while [[ $# -gt 0 ]]; do
       shift
       TASK_LABEL="${1:-$TASK_LABEL}"
       ;;
+    -as|--auto-start)
+      AUTO_START="true"
+      ;;
     -r|--run-at-load)
       RUN_AT_LOAD="true"
       ;;
@@ -651,6 +738,7 @@ done
 case "$MODE" in
   install)
     install_launchd
+    ensure_netbird_auto_start
     ;;
   uninstall)
     uninstall_launchd
