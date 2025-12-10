@@ -1,8 +1,6 @@
 All notable changes to this project will be documented in this file.
 
-The format is based on Keep a Changelog and the project follows Semantic Versioning.
-
-## [0.1.3] – Unreleased
+## [0.1.3] – 2025-12-10
 
 ### Added
 
