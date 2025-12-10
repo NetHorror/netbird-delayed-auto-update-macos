@@ -25,9 +25,10 @@ All notable changes to this project will be documented in this file.
 
 - README and release notes:
 
-  - Quick start explicitly uses `--install -r` for better laptop behaviour.
+  - Quick start explicitly uses `--install --run-at-load` for better laptop behaviour.
   - `--delay-days` default is documented as `10` days.
-  - Auto-start behaviour (`-as` and `--uninstall`) is described in more detail.
+  - Auto-start behaviour (`-as` / `--auto-start` and `-u` / `--uninstall`) and FileVault
+    limitations are described in more detail.
 
 ## [0.1.2] – 2025-12-09
 
@@ -94,4 +95,3 @@ All notable changes to this project will be documented in this file.
     - `--uninstall` / `-u` (remove LaunchDaemon),
     - run mode (delayed-update logic).
 
----
