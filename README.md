@@ -37,11 +37,11 @@ sudo ./netbird-delayed-update-macos.sh --install --run-at-load
 
 This will:
 
-- 🧩 Install `/Library/LaunchDaemons/io.nethorror.netbird-delayed-update.plist`
+- Install `/Library/LaunchDaemons/io.nethorror.netbird-delayed-update.plist`
 - ⏰ Schedule a daily run at `04:00` (system time)
 - 🎲 Add random jitter up to `3600` seconds before each run
-- 🧾 Keep logs for `60` days
-- 🔁 Run once at boot too (because of `--run-at-load`)
+- 🗂️ Keep logs for `60` days
+- 🚀 Run once at boot too (because of `--run-at-load`)
 
 3) (Optional) Ensure NetBird daemon auto-start after boot:
 
@@ -49,62 +49,73 @@ This will:
 sudo ./netbird-delayed-update-macos.sh --install --run-at-load --auto-start
 ~~~
 
-This additionally runs:
+This additionally runs (best-effort):
 
-- 🛠️ `netbird service install`
-- ▶️ `netbird service start`
+- `netbird service install`
+- `netbird service start`
 
 ### ✅ Option B: download the tagged script
 
 ~~~bash
+# Pick a specific release tag (recommended for reproducible installs)
+VERSION="0.1.4"
+
 curl -fsSL -o netbird-delayed-update-macos.sh \
-  https://raw.githubusercontent.com/NetHorror/netbird-delayed-auto-update-macos/0.1.4/netbird-delayed-update-macos.sh
+  "https://raw.githubusercontent.com/NetHorror/netbird-delayed-auto-update-macos/${VERSION}/netbird-delayed-update-macos.sh"
 
 chmod +x ./netbird-delayed-update-macos.sh
 sudo ./netbird-delayed-update-macos.sh --install --run-at-load
 ~~~
 
+Tip: Replace `VERSION` with the tag you want (or point to `main` if you explicitly want the latest development version).
+
 ---
 
 ## ✨ Features
 
-- 🧠 **Delayed rollout window**
+- **Delayed rollout window**
   - New NetBird versions become *candidates*
   - A candidate must remain unchanged for `--delay-days` days
   - Default: **10 days**
   - State file: `/var/lib/netbird-delayed-update/state.json`
 
-- 🧩 **Supports multiple installation types**
-  - 🍺 Homebrew installs (`netbirdio/tap/netbird` or `netbird`)
-  - 📦 Official macOS `.pkg` / GUI installs (`/Applications/NetBird.app`)
-  - 🧰 Other setups where `netbird` is in `PATH`
+- **Supports multiple installation types**
+  - Homebrew installs (`netbirdio/tap/netbird` or `netbird`)
+  - Official macOS `.pkg` / GUI installs (`/Applications/NetBird.app`)
+  - Other setups where `netbird` is available in `PATH`
 
-- 🔎 **Automatic version detection**
-  - Local version via `netbird version`
+- **Automatic version detection**
+  - Local version via `netbird version` (extracts a clean `X.Y.Z`)
   - Upstream version via `https://pkgs.netbird.io/releases/latest`
   - Safe semantic version comparison (including leading zeros)
 
-- 🕒 **launchd integration**
+- **launchd integration**
   - System `LaunchDaemon` scheduled daily at a configurable time
-  - 🔁 `--run-at-load` is useful for laptops / machines that might be off at 04:00
+  - `--run-at-load` is useful for laptops / machines that might be off at the scheduled time
 
-- 🧷 **NetBird daemon auto-start**
-  - `--auto-start` ensures `netbird service install/start`
-  - `--uninstall` also removes NetBird daemon auto-start (`service stop/uninstall`)
+- **NetBird daemon auto-start**
+  - `--auto-start` ensures `netbird service install/start` (best-effort)
+  - `--uninstall` also removes NetBird daemon auto-start (`service stop/uninstall`, best-effort)
   - ⚠️ FileVault limitation applies (see below)
 
-- 🧾 **Logs and retention**
+- **Logs and retention**
   - Per-run logs: `/var/lib/netbird-delayed-update/netbird-delayed-update-YYYYMMDD-HHMMSS.log`
   - launchd output: `/var/lib/netbird-delayed-update/launchd.log`
-  - Old logs are pruned via `--log-retention-days` (default **60**)
+  - Old per-run logs are pruned via `--log-retention-days` (default **60**)
+  - `launchd.log` is capped in size to avoid unbounded growth
 
-- 🧱 **Concurrency guard**
-  - Prevents overlapping runs (manual + scheduled) using a lock directory under
-    `/var/lib/netbird-delayed-update/`
+- **Concurrency guard**
+  - Prevents overlapping runs (manual + scheduled) using a lock directory under `/var/lib/netbird-delayed-update/`
+  - ♻️ **Stale-lock recovery (TTL):** if a lock is left behind after a crash/kill, it’s automatically removed on the next run **only when the stored PID is not running** and the lock is older than `--max-random-delay-seconds` (TTL = `MAX_RANDOM_DELAY_SECONDS`)
+
+- **Self-update (best-effort)**
+  - The script checks the latest GitHub release and may update itself (git pull / tagged raw download)
+  - Failures are logged and the run continues (no hard failure)
+  - The updated script is used on the next run
 
 ---
 
-## 🧰 Installation (alternate layout)
+## Installation (alternate layout)
 
 If you prefer a system path (e.g. `/usr/local/sbin`):
 
@@ -145,11 +156,11 @@ sudo ./netbird-delayed-update-macos.sh --install --run-at-load
 
 uses:
 
-- 🕙 `--daily-time "04:00"`
+- `--daily-time "04:00"`
 - ⏳ `--delay-days 10`
 - 🎲 `--max-random-delay-seconds 3600`
-- 🧾 `--log-retention-days 60`
-- 🔁 `RunAtLoad=true`
+- 🗂️ `--log-retention-days 60`
+- `RunAtLoad=true`
 
 ### Custom schedule
 
@@ -164,7 +175,7 @@ sudo ./netbird-delayed-update-macos.sh --install --run-at-load \
 
 ---
 
-## 🧷 NetBird auto-start before user logon
+## NetBird auto-start before user logon
 
 ### Enable auto-start (`--auto-start`)
 
@@ -196,7 +207,7 @@ sudo ./netbird-delayed-update-macos.sh --uninstall --remove-state
 
 ---
 
-## 🧪 Manual / one-shot runs
+## Manual / one-shot runs
 
 ~~~bash
 sudo ./netbird-delayed-update-macos.sh \
@@ -208,7 +219,43 @@ sudo ./netbird-delayed-update-macos.sh \
 
 ---
 
-## 🔒 Limitations with FileVault / full-disk encryption
+## Troubleshooting
+
+### Where to look for logs
+- Per-run logs: `/var/lib/netbird-delayed-update/netbird-delayed-update-*.log`
+- launchd combined stdout/stderr: `/var/lib/netbird-delayed-update/launchd.log`
+
+### LaunchDaemon looks “not running” — is that OK?
+Yes. This job is not a long-running daemon. It runs, logs, and exits.
+So `launchctl print system/<label>` often shows `state = not running` between runs.
+
+### Force a run now (LaunchDaemon)
+~~~bash
+sudo launchctl kickstart -k system/io.nethorror.netbird-delayed-update
+~~~
+(Replace the label if you installed with `--label`.)
+
+### “Another instance appears to be running” / lock behaviour
+The script uses a lock under `/var/lib/netbird-delayed-update/.lock` to avoid overlapping executions.
+
+- A normal run may sleep up to `--max-random-delay-seconds` (random jitter) **while holding the lock**.
+- If a previous run crashed and left the lock behind, the script will automatically remove it on the next run **only if the stored PID is not running** and the lock age is at least `--max-random-delay-seconds`.
+
+Manual (last resort) lock removal:
+
+~~~bash
+sudo rm -rf /var/lib/netbird-delayed-update/.lock
+~~~
+
+Tip: for immediate manual testing, set jitter to zero:
+
+~~~bash
+sudo ./netbird-delayed-update-macos.sh --max-random-delay-seconds 0
+~~~
+
+---
+
+## Limitations with FileVault / full-disk encryption
 
 If **FileVault** is enabled:
 
@@ -220,41 +267,41 @@ If **FileVault** is enabled:
 
 So:
 
-- 🚫 You cannot rely on NetBird being reachable immediately after a cold boot on a FileVault-encrypted Mac
+- You cannot rely on NetBird being reachable immediately after a cold boot on a FileVault-encrypted Mac
 - ✅ Things work only after someone unlocks the disk and macOS finishes booting
 
 For true headless behaviour after power-on, you need either:
+
 - a system without full-disk encryption, or
 - to keep the machine running and avoid full reboots (sleep/hibernate instead).
 
 ---
 
-## 📌 Command-line reference
+## Command-line reference
 
 ### Modes
-
-- 🧩 `--install` — install the LaunchDaemon
-- 🗑️ `--uninstall` — uninstall the LaunchDaemon and remove NetBird daemon auto-start
-- ▶️ *(no mode)* — run one cycle and exit
+- `--install` — install the LaunchDaemon
+- `--uninstall` — uninstall the LaunchDaemon and remove NetBird daemon auto-start
+- *(no mode)* — run one cycle and exit
 
 ### Options
-
 - ⏳ `--delay-days N` (default: `10`)
 - 🎲 `--max-random-delay-seconds N` (default: `3600`)
-- 🧾 `--log-retention-days N` (default: `60`, set `0` to disable cleanup)
-- 🕙 `--daily-time "HH:MM"` (default: `04:00`)
+- 🗂️ `--log-retention-days N` (default: `60`, set `0` to disable cleanup)
+- ⏰ `--daily-time "HH:MM"` (default: `04:00`)
 - 🏷️ `--label NAME` (default: `io.nethorror.netbird-delayed-update`)
-- 🧷 `--auto-start` (`netbird service install/start`)
-- 🔁 `--run-at-load` (with `--install`)
-- 🧹 `--remove-state` (with `--uninstall`)
-- ❓ `--help`
+- `--auto-start` (`netbird service install/start`)
+- `--run-at-load` (with `--install`)
+- `--remove-state` (with `--uninstall`)
+- `--help`
 
 ---
 
-## 🗂️ State and logs
+## State and logs
 
 Everything lives under:
 
 - `/var/lib/netbird-delayed-update/state.json`
 - `/var/lib/netbird-delayed-update/netbird-delayed-update-*.log`
 - `/var/lib/netbird-delayed-update/launchd.log`
+
