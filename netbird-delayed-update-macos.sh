@@ -132,6 +132,30 @@ extract_semver() {
   echo "$input" | tr -d '\r' | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true
 }
 
+resolve_path() {
+  # macOS has no `readlink -f`, so resolve symlinks manually.
+  local p="$1"
+  local target dir
+  while [[ -L "$p" ]]; do
+    dir="$(cd "$(dirname "$p")" && pwd)"
+    target="$(readlink "$p" 2>/dev/null || true)"
+    [[ -n "$target" ]] || break
+    if [[ "$target" == /* ]]; then
+      p="$target"
+    else
+      p="$dir/$target"
+    fi
+  done
+  echo "$p"
+}
+
+script_self_path() {
+  local src="${BASH_SOURCE[0]}"
+  local dir
+  dir="$(cd "$(dirname "$src")" && pwd)"
+  resolve_path "$dir/$(basename "$src")"
+}
+
 acquire_lock() {
   # Prevent overlapping runs (e.g., manual run + launchd run)
   : "${STATE_DIR:=/var/lib/netbird-delayed-update}"
@@ -248,25 +272,61 @@ netbird_latest_upstream_version() {
 }
 
 detect_install_type() {
-  have_cmd netbird || { echo "other"; return; }
-  local nb_path
-  nb_path="$(command -v netbird)"
-
-  [[ "$nb_path" == *"/Cellar/netbird/"* ]] && { echo "brew"; return; }
-
-  if [[ -L "$nb_path" ]]; then
-    local target
-    target="$(readlink "$nb_path" || true)"
-    [[ "$target" == *"/Applications/NetBird.app/"* ]] && { echo "pkg"; return; }
+  # Prefer explicit Homebrew detection first, so Homebrew-cask UI installs
+  # don't get misclassified as "pkg" just because /Applications/NetBird.app exists.
+  if have_cmd brew; then
+    if brew_has_formula "netbird" || brew_has_formula "netbirdio/tap/netbird"; then
+      echo "brew_formula"; return
+    fi
+    # `brew list --cask` usually shows the token (netbird-ui), but accept the tapped form too.
+    if brew_has_cask "netbird-ui" || brew_has_cask "netbirdio/tap/netbird-ui"; then
+      echo "brew_cask"; return
+    fi
   fi
 
   [[ -d "/Applications/NetBird.app" ]] && { echo "pkg"; return; }
+
+  # Heuristics based on `netbird` path (may be a symlink).
+  if have_cmd netbird; then
+    local nb_path resolved
+    nb_path="$(command -v netbird)"
+    resolved="$(resolve_path "$nb_path")"
+
+    [[ "$resolved" == *"/Cellar/netbird/"* ]] && { echo "brew_formula"; return; }
+    [[ "$resolved" == *"/Applications/NetBird.app/"* ]] && { echo "pkg"; return; }
+  fi
+
   echo "other"
 }
 
 restart_netbird_service() {
   have_cmd netbird || return 0
   netbird service stop >/dev/null 2>&1 || true
+  netbird service start >/dev/null 2>&1 || true
+}
+
+refresh_netbird_service_registration_if_present() {
+  # For Homebrew formula installs, the daemon can remain bound to an old binary path after `brew upgrade`.
+  # Avoid creating a service if it wasn't installed already.
+  have_cmd netbird || return 0
+
+  local plist_found="false"
+  for p in \
+    "/Library/LaunchDaemons/netbird.plist" \
+    "/Library/LaunchDaemons/io.netbird.client.plist" \
+    "/Library/LaunchDaemons/io.netbird.daemon.plist"; do
+    if [[ -f "$p" ]]; then
+      plist_found="true"
+      break
+    fi
+  done
+
+  [[ "$plist_found" == "true" ]] || return 0
+
+  log "Refreshing NetBird daemon service registration (best-effort)..."
+  netbird service stop >/dev/null 2>&1 || true
+  netbird service uninstall >/dev/null 2>&1 || true
+  netbird service install >/dev/null 2>&1 || true
   netbird service start >/dev/null 2>&1 || true
 }
 
@@ -288,28 +348,108 @@ disable_netbird_auto_start() {
 # -------------------- Update mechanisms --------------------
 
 brew_owner_user() {
-  local brew_path
-  brew_path="$(command -v brew 2>/dev/null || true)"
-  [[ -n "$brew_path" ]] || { echo ""; return; }
-  stat -f "%Su" "$brew_path" 2>/dev/null || true
+  # Homebrew should normally be executed as a non-root user.
+  # Prefer the current console user when available; fall back to Homebrew prefix owner.
+  local console_user=""
+  console_user="$(stat -f "%Su" /dev/console 2>/dev/null || true)"
+  if [[ -n "$console_user" && "$console_user" != "root" ]]; then
+    echo "$console_user"
+    return
+  fi
+
+  local owner=""
+  if [[ -d "/opt/homebrew" ]]; then
+    owner="$(stat -f "%Su" "/opt/homebrew" 2>/dev/null || true)"
+  fi
+  if [[ -z "$owner" && -d "/usr/local/Homebrew" ]]; then
+    owner="$(stat -f "%Su" "/usr/local/Homebrew" 2>/dev/null || true)"
+  fi
+  if [[ -z "$owner" ]]; then
+    local brew_path
+    brew_path="$(command -v brew 2>/dev/null || true)"
+    [[ -n "$brew_path" ]] && owner="$(stat -f "%Su" "$brew_path" 2>/dev/null || true)"
+  fi
+
+  echo "$owner"
+}
+
+brew_as_owner() {
+  have_cmd brew || return 1
+  local owner
+  owner="$(brew_owner_user)"
+
+  # If we couldn't determine a user, try running directly (may fail if brew disallows root).
+  if [[ -z "$owner" ]]; then
+    brew "$@"
+    return $?
+  fi
+
+  # Homebrew may refuse to run as root; allow it only as a last resort.
+  if [[ "$owner" == "root" ]]; then
+    HOMEBREW_ALLOW_SUPERUSER=1 brew "$@"
+    return $?
+  fi
+
+  if [[ "$(id -u)" -eq 0 ]]; then
+    sudo -H -u "$owner" brew "$@"
+  else
+    brew "$@"
+  fi
+}
+
+brew_has_formula() {
+  local name="$1"
+  brew_as_owner list --formula 2>/dev/null | grep -qx "$name"
+}
+
+brew_has_cask() {
+  local name="$1"
+  brew_as_owner list --cask 2>/dev/null | grep -qx "$name"
 }
 
 brew_upgrade_netbird() {
+  # arg: "formula" or "cask"
+  local kind="${1:-formula}"
+
   have_cmd brew || die "Homebrew not found, but install type detected as brew."
+
   local owner
   owner="$(brew_owner_user)"
-  [[ -n "$owner" ]] || die "Unable to determine Homebrew owner user."
+  [[ -n "$owner" ]] || log "Warning: unable to determine Homebrew owner; will try running brew as current user."
 
-  log "Upgrading NetBird via Homebrew as user: $owner"
+  log "Upgrading NetBird via Homebrew (${kind})"
 
+  # Keep the tap/index reasonably fresh. Some environments disable auto-update; do it explicitly.
+  brew_as_owner update >/dev/null 2>&1 || true
+
+  if [[ "$kind" == "cask" ]]; then
+    local cask=""
+    if brew_has_cask "netbird-ui"; then
+      cask="netbird-ui"
+    elif brew_has_cask "netbirdio/tap/netbird-ui"; then
+      cask="netbirdio/tap/netbird-ui"
+    fi
+    [[ -n "$cask" ]] || die "NetBird UI cask not found in Homebrew."
+    log "Upgrading Homebrew cask: $cask"
+    brew_as_owner upgrade --cask "$cask"
+    restart_netbird_service
+    return 0
+  fi
+
+  # formula
   local formula="netbirdio/tap/netbird"
-  if sudo -u "$owner" brew list --formula 2>/dev/null | grep -qx "netbird"; then
+  if brew_has_formula "netbird"; then
     formula="netbird"
-  elif sudo -u "$owner" brew list --formula 2>/dev/null | grep -qx "netbirdio/tap/netbird"; then
+  elif brew_has_formula "netbirdio/tap/netbird"; then
     formula="netbirdio/tap/netbird"
   fi
 
-  sudo -u "$owner" brew upgrade "$formula"
+  log "Upgrading Homebrew formula: $formula"
+  brew_as_owner upgrade "$formula"
+
+  # Best-effort fix for cases where the running daemon stays on an old binary after brew upgrade.
+  refresh_netbird_service_registration_if_present || true
+
   restart_netbird_service
 }
 
@@ -319,7 +459,7 @@ pkg_upgrade_netbird() {
   local arch tmp_pkg pkg_url
   arch="$(pkg_arch)"
   pkg_url="https://pkgs.netbird.io/macos/${arch}"
-  tmp_pkg="/tmp/netbird.pkg"
+  tmp_pkg="$(mktemp "/tmp/netbird.pkg.XXXXXX")"
 
   log "Downloading NetBird pkg for arch ${arch} from ${pkg_url}"
   curl -fsSL --retry 3 --connect-timeout 10 --max-time 300 -o "$tmp_pkg" "$pkg_url" \
@@ -327,6 +467,7 @@ pkg_upgrade_netbird() {
 
   log "Installing NetBird pkg..."
   installer -pkg "$tmp_pkg" -target / >/dev/null
+
   rm -f "$tmp_pkg" >/dev/null 2>&1 || true
   restart_netbird_service
 }
@@ -342,9 +483,10 @@ perform_upgrade() {
   log "Detected install type: $install_type"
 
   case "$install_type" in
-    brew) brew_upgrade_netbird ;;
-    pkg)  pkg_upgrade_netbird ;;
-    *)    other_upgrade_netbird ;;
+    brew_formula) brew_upgrade_netbird "formula" ;;
+    brew_cask)    brew_upgrade_netbird "cask" ;;
+    pkg)          pkg_upgrade_netbird ;;
+    *)            other_upgrade_netbird ;;
   esac
 }
 
@@ -461,12 +603,63 @@ self_update_if_needed() {
   latest_tag="$(echo "$latest_tag" | tr -d '[:space:]')"
   [[ -n "$latest_tag" ]] || return 0
 
+  # Allow both vX.Y.Z and X.Y.Z tags.
   latest_tag="${latest_tag#v}"
 
-  if version_gt "$latest_tag" "$SCRIPT_VERSION"; then
-    log "Newer script version available: $latest_tag (current: $SCRIPT_VERSION). Attempting self-update..."
-    # Best-effort only; keep as-is.
+  if ! version_gt "$latest_tag" "$SCRIPT_VERSION"; then
+    return 0
   fi
+
+  log "Newer script version available: $latest_tag (current: $SCRIPT_VERSION). Attempting self-update..."
+
+  local self_path script_dir
+  self_path="$(script_self_path)"
+  script_dir="$(dirname "$self_path")"
+
+  # 1) If we're inside a git checkout, try `git pull --ff-only` first.
+  if have_cmd git && git -C "$script_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    log "Self-update: attempting git pull --ff-only in $script_dir"
+    if git -C "$script_dir" pull --ff-only >/dev/null 2>&1; then
+      log "Self-update: git pull completed. Updated script will be used on the next run."
+      return 0
+    fi
+    log "Self-update: git pull failed; falling back to raw download."
+  fi
+
+  # 2) Download the script from the tagged release and overwrite ourselves.
+  local url tmp
+  url="https://raw.githubusercontent.com/${SELFUPDATE_REPO}/${latest_tag}/${SELFUPDATE_PATH}"
+  tmp="$(mktemp "${STATE_DIR}/selfupdate.XXXXXX")"
+
+  log "Self-update: downloading ${url}"
+  if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 -o "$tmp" "$url"; then
+    log "Self-update: download failed; keeping current script."
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if ! head -n 1 "$tmp" | grep -q '^#!/usr/bin/env bash'; then
+    log "Self-update: downloaded file doesn't look like a bash script; aborting."
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  # Basic sanity: ensure the downloaded script declares the expected version.
+  if ! grep -q "SCRIPT_VERSION=\"${latest_tag}\"" "$tmp" 2>/dev/null; then
+    log "Self-update: sanity check failed (SCRIPT_VERSION mismatch); aborting."
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  local backup="${self_path}.bak-$(date -u +%Y%m%d-%H%M%S)"
+  cp -f "$self_path" "$backup" >/dev/null 2>&1 || true
+
+  cp -f "$tmp" "$self_path"
+  chmod 755 "$self_path" >/dev/null 2>&1 || true
+  chown root:wheel "$self_path" >/dev/null 2>&1 || true
+  rm -f "$tmp" >/dev/null 2>&1 || true
+
+  log "Self-update: updated script written to $self_path (backup: $backup). New version will run next cycle."
 }
 
 # -------------------- Delayed update logic --------------------
@@ -585,4 +778,3 @@ case "$MODE" in
   run) [[ "$(id -u)" -eq 0 ]] || die "Run mode requires root (sudo)."; run_cycle ;;
   *) die "Invalid mode: $MODE" ;;
 esac
-
