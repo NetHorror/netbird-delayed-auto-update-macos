@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-# Preserve existing PATH order (important for test stubs); append common locations if missing.
+# Preserve existing PATH order; append common locations if missing.
 DEFAULT_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 PATH="${PATH:-$DEFAULT_PATH}"
 for p in /opt/homebrew/bin /opt/homebrew/sbin /usr/local/bin /usr/local/sbin; do
@@ -43,8 +43,9 @@ SCRIPT_VERSION="0.1.4"
 SELFUPDATE_REPO="NetHorror/netbird-delayed-auto-update-macos"
 SELFUPDATE_PATH="netbird-delayed-update-macos.sh"
 
-# Lock stale policy: if lock exists, PID is not running, and lock age >= this -> remove lock
-LOCK_STALE_SECONDS=3600  # 1 hour
+# Lock stale policy:
+# will be set to MAX_RANDOM_DELAY_SECONDS after args parsing; initialize to default
+LOCK_STALE_SECONDS="$DEFAULT_MAX_RANDOM_DELAY_SECONDS"
 
 # -------------------- Global runtime state --------------------
 
@@ -159,7 +160,8 @@ script_self_path() {
   resolve_path "$dir/$(basename "$src")"
 }
 
-# Robust lock: stores PID + creation time. Removes stale lock if PID is dead and lock is old.
+# Robust lock: stores PID + creation time.
+# Removes stale lock if PID is dead and lock age >= LOCK_STALE_SECONDS.
 acquire_lock() {
   mkdir -p "$STATE_DIR"
 
@@ -184,18 +186,7 @@ acquire_lock() {
 
   # If PID is alive, do not touch the lock.
   if [[ -n "$pid" ]] && ps -p "$pid" >/dev/null 2>&1; then
-    # Optional: detect very old lock with live PID (hung process). We keep it to avoid concurrency.
-    local created_live=""
-    created_live="$(cat "$ts_file" 2>/dev/null || true)"
-    if [[ ! "$created_live" =~ ^[0-9]+$ ]]; then
-      created_live="$(stat -f %m "$lock_dir" 2>/dev/null || echo 0)"
-    fi
-    local age_live=$(( now - created_live ))
-    if (( age_live >= LOCK_STALE_SECONDS )); then
-      log "Lock is older than ${LOCK_STALE_SECONDS}s but PID $pid is still running. Leaving lock intact."
-    else
-      log "Another instance appears to be running (pid: $pid, lock: $lock_dir). Exiting."
-    fi
+    log "Another instance appears to be running (pid: $pid, lock: $lock_dir). Exiting."
     return 1
   fi
 
@@ -216,7 +207,7 @@ acquire_lock() {
   fi
 
   if (( age >= LOCK_STALE_SECONDS )); then
-    log "Stale lock detected (age ${age}s, pid '${pid:-none}'). Removing lock and retrying..."
+    log "Stale lock detected (age ${age}s >= ${LOCK_STALE_SECONDS}s, pid '${pid:-none}'). Removing lock and retrying..."
     rm -rf "$lock_dir" 2>/dev/null || true
 
     if mkdir "$lock_dir" 2>/dev/null; then
@@ -225,6 +216,7 @@ acquire_lock() {
       trap "rm -rf \"$lock_dir\" 2>/dev/null || true" EXIT INT TERM HUP
       return 0
     fi
+
     log "Failed to recreate lock after removing stale lock. Exiting."
     return 1
   fi
@@ -736,6 +728,7 @@ run_cycle() {
   cleanup_old_logs
 
   log "Starting run cycle (script version: $SCRIPT_VERSION)"
+  log "Lock stale TTL: ${LOCK_STALE_SECONDS}s (equals MAX_RANDOM_DELAY_SECONDS)"
 
   acquire_lock || return 0
 
@@ -809,6 +802,9 @@ done
 [[ "$MAX_RANDOM_DELAY_SECONDS" =~ ^[0-9]+$ ]] || die "--max-random-delay-seconds must be an integer"
 [[ "$LOG_RETENTION_DAYS" =~ ^[0-9]+$ ]] || die "--log-retention-days must be an integer"
 validate_daily_time "$DAILY_TIME" || die "Invalid --daily-time '$DAILY_TIME' (expected HH:MM, 00:00..23:59)."
+
+# Lock TTL = MAX_RANDOM_DELAY_SECONDS
+LOCK_STALE_SECONDS=$((10#$MAX_RANDOM_DELAY_SECONDS))
 
 # -------------------- Main --------------------
 
