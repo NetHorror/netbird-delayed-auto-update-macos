@@ -1,4 +1,19 @@
-All notable changes to this project will be documented in this file.
+## [0.1.4] – 2025-12-13
+
+### Added
+
+- Overlapping-run protection (lock) to avoid concurrent executions (e.g. launchd + manual run).
+- `curl` wrapper with timeouts and retries, used for upstream version checks, pkg downloads and script self-update.
+- Size cap for `launchd.log` (to avoid unbounded growth).
+
+### Changed
+
+- More robust local version parsing: extracts a clean `X.Y.Z` from `netbird version` output.
+- Version comparison hardened to handle leading zeros safely.
+- Version “age in days” is now computed from the actual run time (works correctly with random jitter).
+- `--daily-time` validation tightened.
+- In `--install` mode, `--auto-start` is now persisted into the installed LaunchDaemon arguments (so daily runs also enforce daemon start if desired).
+- README updated: Quick start moved to the top and docs adjusted for the changes above.
 
 ## [0.1.3] – 2025-12-10
 
