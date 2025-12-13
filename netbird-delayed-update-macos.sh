@@ -4,6 +4,11 @@
 # NetBird Delayed Auto-Update for macOS
 #
 # Delayed (staged) auto-update for the NetBird client on macOS.
+#
+# IMPORTANT SAFETY CHANGE (0.1.4 republish):
+# - `--uninstall` ONLY removes this script's LaunchDaemon.
+# - It does NOT touch NetBird (client/service) unless you explicitly pass
+#   `--remove-netbird-auto-start`.
 
 set -euo pipefail
 
@@ -38,6 +43,9 @@ LOG_RETENTION_DAYS="$DEFAULT_LOG_RETENTION_DAYS"
 
 AUTO_START="false"
 
+# Only used with --uninstall when explicitly requested
+REMOVE_NETBIRD_AUTOSTART="false"
+
 # Script self-update (best-effort)
 SCRIPT_VERSION="0.1.4"
 SELFUPDATE_REPO="NetHorror/netbird-delayed-auto-update-macos"
@@ -63,7 +71,7 @@ NetBird Delayed Auto-Update for macOS
 
 Modes:
   -i, --install           Install LaunchDaemon for daily runs
-  -u, --uninstall         Uninstall LaunchDaemon (and remove NetBird daemon auto-start)
+  -u, --uninstall         Uninstall LaunchDaemon (does NOT touch NetBird by default)
   (no mode)               Run one delayed-update cycle and exit
 
 Options:
@@ -75,6 +83,7 @@ Options:
   -r, --run-at-load               With --install: run once at boot (RunAtLoad=true)
   -as, --auto-start               Ensure NetBird daemon is installed/started as a system service
   --remove-state                  With --uninstall: remove /var/lib/netbird-delayed-update
+  --remove-netbird-auto-start     With --uninstall: ALSO stop+uninstall NetBird daemon service
   -h, --help                      Show help and exit
 EOF
 }
@@ -198,7 +207,7 @@ acquire_lock() {
   fi
 
   local age=$(( now - created ))
-  if (( age < 0 )); then age=0; fi
+  (( age < 0 )) && age=0
 
   # Grace period: avoid racing with another instance that just created lock but hasn't written pid yet.
   if (( age < GRACE_SECONDS )); then
@@ -387,7 +396,7 @@ ensure_netbird_auto_start() {
 }
 
 disable_netbird_auto_start() {
-  have_cmd netbird || return 0
+  have_cmd netbird || { log "netbird not found in PATH; cannot remove NetBird auto-start."; return 0; }
   log "Stopping and uninstalling NetBird daemon service (remove auto-start)..."
   netbird service stop >/dev/null 2>&1 || true
   netbird service uninstall >/dev/null 2>&1 || true
@@ -615,7 +624,12 @@ uninstall_daemon() {
     log "Plist not found (already removed?): $plist"
   fi
 
-  disable_netbird_auto_start
+  # SAFETY: Do NOT touch NetBird unless explicitly requested.
+  if [[ "$REMOVE_NETBIRD_AUTOSTART" == "true" ]]; then
+    disable_netbird_auto_start
+  else
+    log "Not touching NetBird service auto-start (use --remove-netbird-auto-start to remove it)."
+  fi
 
   if [[ "$REMOVE_STATE" == "true" ]]; then
     log "Removing state/logs directory: $STATE_DIR"
@@ -677,6 +691,8 @@ self_update_if_needed() {
     return 0
   fi
 
+  # NOTE: if you release tags, ensure the script's SCRIPT_VERSION matches the tag,
+  # otherwise this check will (intentionally) refuse to overwrite.
   if ! grep -q "SCRIPT_VERSION=\"${latest_tag}\"" "$tmp" 2>/dev/null; then
     log "Self-update: sanity check failed (SCRIPT_VERSION mismatch); aborting."
     rm -f "$tmp" >/dev/null 2>&1 || true
@@ -787,6 +803,7 @@ while [[ $# -gt 0 ]]; do
     -u|--uninstall) MODE="uninstall"; shift ;;
     -r|--run-at-load) RUN_AT_LOAD="true"; shift ;;
     --remove-state) REMOVE_STATE="true"; shift ;;
+    --remove-netbird-auto-start) REMOVE_NETBIRD_AUTOSTART="true"; shift ;;
     -as|--auto-start) AUTO_START="true"; shift ;;
     --delay-days) DELAY_DAYS="${2:-}"; shift 2 ;;
     --max-random-delay-seconds) MAX_RANDOM_DELAY_SECONDS="${2:-}"; shift 2 ;;
