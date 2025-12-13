@@ -7,8 +7,15 @@
 
 set -euo pipefail
 
-# Ensure common Homebrew/bin locations are in PATH (for root / launchd)
-PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+# Preserve existing PATH order (important for test stubs); append common locations if missing.
+DEFAULT_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+PATH="${PATH:-$DEFAULT_PATH}"
+for p in /opt/homebrew/bin /opt/homebrew/sbin /usr/local/bin /usr/local/sbin; do
+  case ":$PATH:" in
+    *":$p:"*) : ;;
+    *) PATH="$PATH:$p" ;;
+  esac
+done
 export PATH
 
 # -------------------- Defaults / Config --------------------
@@ -31,7 +38,7 @@ LOG_RETENTION_DAYS="$DEFAULT_LOG_RETENTION_DAYS"
 
 AUTO_START="false"
 
-# Script self-update
+# Script self-update (best-effort)
 SCRIPT_VERSION="0.1.4"
 SELFUPDATE_REPO="NetHorror/netbird-delayed-auto-update-macos"
 SELFUPDATE_PATH="netbird-delayed-update-macos.sh"
@@ -116,33 +123,32 @@ cleanup_old_logs() {
 }
 
 curl_fetch() {
-  # Wrapper around curl with timeouts/retries suitable for unattended jobs.
-  # Keep flags compatible with Apple's system curl (avoid --retry-all-errors).
   local url="$1"
   curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 "$url"
 }
 
 extract_semver() {
-  # Extract the first X.Y.Z-like token from arbitrary text.
-  # Prints empty string if none found.
   local input="$1"
   echo "$input" | tr -d '\r' | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true
 }
 
 acquire_lock() {
   # Prevent overlapping runs (e.g., manual run + launchd run)
+  : "${STATE_DIR:=/var/lib/netbird-delayed-update}"
   mkdir -p "$STATE_DIR"
+
   local lock_dir="${STATE_DIR}/.lock"
   if ! mkdir "$lock_dir" 2>/dev/null; then
     log "Another instance appears to be running (lock: $lock_dir). Exiting."
     return 1
   fi
-  trap 'rm -rf "$lock_dir" 2>/dev/null || true' EXIT
+
+  # Expand $lock_dir at trap setup time to avoid set -u / scope issues later.
+  trap "rm -rf \"$lock_dir\" 2>/dev/null || true" EXIT INT TERM HUP
   return 0
 }
 
 version_cmp() {
-  # returns: 0 if equal, 1 if v1>v2, 2 if v1<v2
   local v1="$1"
   local v2="$2"
   local IFS=.
@@ -152,7 +158,6 @@ version_cmp() {
   read -r -a a1 <<<"$v1"
   read -r -a a2 <<<"$v2"
 
-  # pad shorter
   for ((i=${#a1[@]}; i<3; i++)); do a1[i]=0; done
   for ((i=${#a2[@]}; i<3; i++)); do a2[i]=0; done
 
@@ -167,11 +172,9 @@ version_cmp() {
     n2=$((10#$n2))
 
     if (( n1 > n2 )); then
-      echo 1
-      return
+      echo 1; return
     elif (( n1 < n2 )); then
-      echo 2
-      return
+      echo 2; return
     fi
   done
 
@@ -179,37 +182,22 @@ version_cmp() {
 }
 
 version_lt() {
-  local v1="$1"
-  local v2="$2"
-  local cmp
-  cmp="$(version_cmp "$v1" "$v2")"
-  [[ "$cmp" -eq 2 ]]
+  local v1="$1" v2="$2"
+  [[ "$(version_cmp "$v1" "$v2")" -eq 2 ]]
 }
 
 version_gt() {
-  local v1="$1"
-  local v2="$2"
-  local cmp
-  cmp="$(version_cmp "$v1" "$v2")"
-  [[ "$cmp" -eq 1 ]]
+  local v1="$1" v2="$2"
+  [[ "$(version_cmp "$v1" "$v2")" -eq 1 ]]
 }
 
 validate_daily_time() {
-  # Expected format HH:MM (00-23:00-59)
   local t="$1"
-  if [[ ! "$t" =~ ^[0-9]{2}:[0-9]{2}$ ]]; then
-    return 1
-  fi
-  local hh="${t%:*}"
-  local mm="${t#*:}"
-  hh=$((10#$hh))
-  mm=$((10#$mm))
-  if (( hh < 0 || hh > 23 )); then
-    return 1
-  fi
-  if (( mm < 0 || mm > 59 )); then
-    return 1
-  fi
+  if [[ ! "$t" =~ ^[0-9]{2}:[0-9]{2}$ ]]; then return 1; fi
+  local hh="${t%:*}" mm="${t#*:}"
+  hh=$((10#$hh)); mm=$((10#$mm))
+  (( hh >= 0 && hh <= 23 )) || return 1
+  (( mm >= 0 && mm <= 59 )) || return 1
   return 0
 }
 
@@ -221,123 +209,77 @@ validate_daily_time() {
 # }
 
 read_state_candidate_version() {
-  if [[ ! -f "$STATE_FILE" ]]; then
-    echo ""
-    return
-  fi
-  grep -E '"candidate_version"\s*:' "$STATE_FILE" | head -n1 | sed -E 's/.*"candidate_version"\s*:\s*"([^"]+)".*/\1/' || true
+  [[ -f "$STATE_FILE" ]] || { echo ""; return; }
+  grep -E '"candidate_version"[[:space:]]*:' "$STATE_FILE" | head -n1 \
+    | sed -E 's/.*"candidate_version"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/' || true
 }
 
 read_state_first_seen() {
-  if [[ ! -f "$STATE_FILE" ]]; then
-    echo ""
-    return
-  fi
-  grep -E '"first_seen_utc"\s*:' "$STATE_FILE" | head -n1 | sed -E 's/.*"first_seen_utc"\s*:\s*"([^"]+)".*/\1/' || true
+  [[ -f "$STATE_FILE" ]] || { echo ""; return; }
+  grep -E '"first_seen_utc"[[:space:]]*:' "$STATE_FILE" | head -n1 \
+    | sed -E 's/.*"first_seen_utc"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/' || true
 }
 
 write_state() {
-  local cand="$1"
-  local first_seen="$2"
+  local cand="$1" first_seen="$2"
   mkdir -p "$STATE_DIR"
-  cat >"$STATE_FILE" <<EOF
+  cat >"$STATE_FILE" <<STATE_EOF
 {
   "candidate_version": "$cand",
   "first_seen_utc": "$first_seen"
 }
-EOF
+STATE_EOF
 }
 
 # -------------------- NetBird helpers --------------------
 
-have_cmd() {
-  command -v "$1" >/dev/null 2>&1
-}
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 netbird_local_version() {
-  if ! have_cmd netbird; then
-    echo ""
-    return
-  fi
-
-  local out
-  out="$(netbird version 2>/dev/null || true)"
-  extract_semver "$out"
+  have_cmd netbird || { echo ""; return; }
+  extract_semver "$(netbird version 2>/dev/null || true)"
 }
 
 netbird_latest_upstream_version() {
-  local url="https://pkgs.netbird.io/releases/latest"
   local out
-  out="$(curl_fetch "$url" 2>/dev/null || true)"
+  out="$(curl_fetch "https://pkgs.netbird.io/releases/latest" 2>/dev/null || true)"
   out="$(echo "$out" | tr -d '[:space:]')"
-  # "latest" endpoint is expected to be a plain version like X.Y.Z, but extract just in case
   extract_semver "$out"
 }
 
 detect_install_type() {
-  # Returns one of: brew, pkg, other
-  # Best-effort heuristic.
-  if ! have_cmd netbird; then
-    echo "other"
-    return
-  fi
-
+  have_cmd netbird || { echo "other"; return; }
   local nb_path
   nb_path="$(command -v netbird)"
 
-  if [[ "$nb_path" == *"/Cellar/netbird/"* ]]; then
-    echo "brew"
-    return
-  fi
+  [[ "$nb_path" == *"/Cellar/netbird/"* ]] && { echo "brew"; return; }
 
-  # Standard app install often symlinks to /usr/local/bin/netbird
-  # with target inside /Applications/NetBird.app
   if [[ -L "$nb_path" ]]; then
     local target
     target="$(readlink "$nb_path" || true)"
-    if [[ "$target" == *"/Applications/NetBird.app/"* ]]; then
-      echo "pkg"
-      return
-    fi
+    [[ "$target" == *"/Applications/NetBird.app/"* ]] && { echo "pkg"; return; }
   fi
 
-  # If the app exists, treat as pkg
-  if [[ -d "/Applications/NetBird.app" ]]; then
-    echo "pkg"
-    return
-  fi
-
+  [[ -d "/Applications/NetBird.app" ]] && { echo "pkg"; return; }
   echo "other"
 }
 
 restart_netbird_service() {
-  if have_cmd netbird; then
-    # These are safe even if service isn't installed/running
-    netbird service stop >/dev/null 2>&1 || true
-    netbird service start >/dev/null 2>&1 || true
-  fi
+  have_cmd netbird || return 0
+  netbird service stop >/dev/null 2>&1 || true
+  netbird service start >/dev/null 2>&1 || true
 }
 
 ensure_netbird_auto_start() {
-  if [[ "$AUTO_START" != "true" ]]; then
-    return 0
-  fi
-
-  if ! have_cmd netbird; then
-    log "AUTO_START enabled but netbird not found in PATH; skipping netbird service install/start."
-    return 0
-  fi
-
+  [[ "$AUTO_START" == "true" ]] || return 0
+  have_cmd netbird || { log "AUTO_START enabled but netbird not found in PATH; skipping."; return 0; }
   log "Ensuring NetBird daemon auto-start is installed and running..."
   netbird service install >/dev/null 2>&1 || true
   netbird service start >/dev/null 2>&1 || true
 }
 
 disable_netbird_auto_start() {
-  if ! have_cmd netbird; then
-    return 0
-  fi
-
+  have_cmd netbird || return 0
   log "Stopping and uninstalling NetBird daemon service (remove auto-start)..."
   netbird service stop >/dev/null 2>&1 || true
   netbird service uninstall >/dev/null 2>&1 || true
@@ -346,30 +288,20 @@ disable_netbird_auto_start() {
 # -------------------- Update mechanisms --------------------
 
 brew_owner_user() {
-  # Determine the owner user of the brew binary (for non-root brew usage).
   local brew_path
   brew_path="$(command -v brew 2>/dev/null || true)"
-  if [[ -z "$brew_path" ]]; then
-    echo ""
-    return
-  fi
+  [[ -n "$brew_path" ]] || { echo ""; return; }
   stat -f "%Su" "$brew_path" 2>/dev/null || true
 }
 
 brew_upgrade_netbird() {
-  if ! have_cmd brew; then
-    die "Homebrew not found, but install type detected as brew."
-  fi
-
+  have_cmd brew || die "Homebrew not found, but install type detected as brew."
   local owner
   owner="$(brew_owner_user)"
-  if [[ -z "$owner" ]]; then
-    die "Unable to determine Homebrew owner user."
-  fi
+  [[ -n "$owner" ]] || die "Unable to determine Homebrew owner user."
 
   log "Upgrading NetBird via Homebrew as user: $owner"
 
-  # Decide which formula is installed: netbirdio/tap/netbird or netbird
   local formula="netbirdio/tap/netbird"
   if sudo -u "$owner" brew list --formula 2>/dev/null | grep -qx "netbird"; then
     formula="netbird"
@@ -378,37 +310,24 @@ brew_upgrade_netbird() {
   fi
 
   sudo -u "$owner" brew upgrade "$formula"
-
-  # Homebrew upgrades don't always restart services; try to restart netbird service
   restart_netbird_service
 }
 
-pkg_arch() {
-  local arch
-  arch="$(uname -m)"
-  if [[ "$arch" == "arm64" ]]; then
-    echo "arm64"
-  else
-    echo "amd64"
-  fi
-}
+pkg_arch() { [[ "$(uname -m)" == "arm64" ]] && echo "arm64" || echo "amd64"; }
 
 pkg_upgrade_netbird() {
-  local arch
+  local arch tmp_pkg pkg_url
   arch="$(pkg_arch)"
-
-  local pkg_url="https://pkgs.netbird.io/macos/${arch}"
-  local tmp_pkg="/tmp/netbird.pkg"
+  pkg_url="https://pkgs.netbird.io/macos/${arch}"
+  tmp_pkg="/tmp/netbird.pkg"
 
   log "Downloading NetBird pkg for arch ${arch} from ${pkg_url}"
-  if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 300 -o "$tmp_pkg" "$pkg_url"; then
-    die "Failed to download NetBird pkg."
-  fi
+  curl -fsSL --retry 3 --connect-timeout 10 --max-time 300 -o "$tmp_pkg" "$pkg_url" \
+    || die "Failed to download NetBird pkg."
 
   log "Installing NetBird pkg..."
   installer -pkg "$tmp_pkg" -target / >/dev/null
   rm -f "$tmp_pkg" >/dev/null 2>&1 || true
-
   restart_netbird_service
 }
 
@@ -423,102 +342,65 @@ perform_upgrade() {
   log "Detected install type: $install_type"
 
   case "$install_type" in
-    brew)
-      brew_upgrade_netbird
-      ;;
-    pkg)
-      pkg_upgrade_netbird
-      ;;
-    *)
-      other_upgrade_netbird
-      ;;
+    brew) brew_upgrade_netbird ;;
+    pkg)  pkg_upgrade_netbird ;;
+    *)    other_upgrade_netbird ;;
   esac
 }
 
 # -------------------- LaunchDaemon management --------------------
 
-plist_path() {
-  echo "/Library/LaunchDaemons/${LABEL}.plist"
-}
+plist_path() { echo "/Library/LaunchDaemons/${LABEL}.plist"; }
 
 render_plist() {
-  # Use StartCalendarInterval {Hour, Minute}
-  local hh="${DAILY_TIME%:*}"
-  local mm="${DAILY_TIME#*:}"
-  hh=$((10#$hh))
-  mm=$((10#$mm))
+  local hh="${DAILY_TIME%:*}" mm="${DAILY_TIME#*:}"
+  hh=$((10#$hh)); mm=$((10#$mm))
 
   local script_path
-  # Resolve script path as invoked (absolute if possible)
   script_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
-  # Build ProgramArguments
   local args_xml="<string>${script_path}</string>
-    <string>--delay-days</string>
-    <string>${DELAY_DAYS}</string>
-    <string>--max-random-delay-seconds</string>
-    <string>${MAX_RANDOM_DELAY_SECONDS}</string>
-    <string>--log-retention-days</string>
-    <string>${LOG_RETENTION_DAYS}</string>
-    <string>--daily-time</string>
-    <string>${DAILY_TIME}</string>
-    <string>--label</string>
-    <string>${LABEL}</string>"
-  if [[ "$AUTO_START" == "true" ]]; then
-    args_xml="${args_xml}
+    <string>--delay-days</string><string>${DELAY_DAYS}</string>
+    <string>--max-random-delay-seconds</string><string>${MAX_RANDOM_DELAY_SECONDS}</string>
+    <string>--log-retention-days</string><string>${LOG_RETENTION_DAYS}</string>
+    <string>--daily-time</string><string>${DAILY_TIME}</string>
+    <string>--label</string><string>${LABEL}</string>"
+  [[ "$AUTO_START" == "true" ]] && args_xml="${args_xml}
     <string>--auto-start</string>"
-  fi
 
   cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key>
-  <string>${LABEL}</string>
-
+  <key>Label</key><string>${LABEL}</string>
   <key>ProgramArguments</key>
   <array>
     ${args_xml}
   </array>
-
   <key>StartCalendarInterval</key>
   <dict>
-    <key>Hour</key>
-    <integer>${hh}</integer>
-    <key>Minute</key>
-    <integer>${mm}</integer>
+    <key>Hour</key><integer>${hh}</integer>
+    <key>Minute</key><integer>${mm}</integer>
   </dict>
-
-  <key>RunAtLoad</key>
-  <${RUN_AT_LOAD}/>
-
-  <key>StandardOutPath</key>
-  <string>${STATE_DIR}/launchd.log</string>
-  <key>StandardErrorPath</key>
-  <string>${STATE_DIR}/launchd.log</string>
+  <key>RunAtLoad</key><${RUN_AT_LOAD}/>
+  <key>StandardOutPath</key><string>${STATE_DIR}/launchd.log</string>
+  <key>StandardErrorPath</key><string>${STATE_DIR}/launchd.log</string>
 </dict>
 </plist>
 EOF
 }
 
 launchctl_bootout_or_unload() {
-  local plist
-  plist="$(plist_path)"
-  # Prefer modern launchctl where possible, fallback to legacy
-  if launchctl bootout system "$plist" >/dev/null 2>&1; then
-    return 0
-  fi
+  local plist; plist="$(plist_path)"
+  launchctl bootout system "$plist" >/dev/null 2>&1 && return 0
   launchctl unload -w "$plist" >/dev/null 2>&1 || true
   return 0
 }
 
 launchctl_bootstrap_or_load() {
-  local plist
-  plist="$(plist_path)"
-  if launchctl bootstrap system "$plist" >/dev/null 2>&1; then
-    return 0
-  fi
+  local plist; plist="$(plist_path)"
+  launchctl bootstrap system "$plist" >/dev/null 2>&1 && return 0
   launchctl load -w "$plist" >/dev/null 2>&1 || true
   return 0
 }
@@ -530,32 +412,26 @@ install_daemon() {
   mkdir -p "$STATE_DIR"
   cleanup_old_logs
 
-  local plist
-  plist="$(plist_path)"
-
+  local plist; plist="$(plist_path)"
   log "Installing LaunchDaemon at: $plist"
 
   render_plist >"$plist"
   chown root:wheel "$plist"
   chmod 644 "$plist"
 
-  # Unload first to apply changes cleanly, then load
   launchctl_bootout_or_unload
   launchctl_bootstrap_or_load
 
   log "LaunchDaemon installed and loaded."
-
-  # Optionally configure NetBird daemon auto-start now
   ensure_netbird_auto_start
 }
 
 uninstall_daemon() {
   [[ "$(id -u)" -eq 0 ]] || die "--uninstall requires root (sudo)."
 
-  local plist
-  plist="$(plist_path)"
-
+  local plist; plist="$(plist_path)"
   log "Uninstalling LaunchDaemon: $plist"
+
   if [[ -f "$plist" ]]; then
     launchctl_bootout_or_unload
     rm -f "$plist" || true
@@ -563,7 +439,6 @@ uninstall_daemon() {
     log "Plist not found (already removed?): $plist"
   fi
 
-  # Always try to remove NetBird system auto-start
   disable_netbird_auto_start
 
   if [[ "$REMOVE_STATE" == "true" ]]; then
@@ -574,62 +449,23 @@ uninstall_daemon() {
   log "Uninstall complete."
 }
 
-# -------------------- Script self-update --------------------
+# -------------------- Script self-update (best-effort) --------------------
 
 self_update_if_needed() {
-  # Only attempt if curl is available
-  if ! have_cmd curl; then
-    return 0
-  fi
+  have_cmd curl || return 0
 
   local api="https://api.github.com/repos/${SELFUPDATE_REPO}/releases/latest"
   local latest_tag
-  latest_tag="$(curl_fetch "$api" 2>/dev/null | grep -E '"tag_name"\s*:' | head -n1 | sed -E 's/.*"tag_name"\s*:\s*"([^"]+)".*/\1/' || true)"
+  latest_tag="$(curl_fetch "$api" 2>/dev/null | grep -E '"tag_name"[[:space:]]*:' | head -n1 \
+    | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)"
   latest_tag="$(echo "$latest_tag" | tr -d '[:space:]')"
+  [[ -n "$latest_tag" ]] || return 0
 
-  if [[ -z "$latest_tag" ]]; then
-    return 0
-  fi
-
-  # tags may be like "0.1.3" or "v0.1.3"
   latest_tag="${latest_tag#v}"
 
   if version_gt "$latest_tag" "$SCRIPT_VERSION"; then
     log "Newer script version available: $latest_tag (current: $SCRIPT_VERSION). Attempting self-update..."
-
-    # If this is a git checkout, try git pull first
-    if [[ -d ".git" ]] && have_cmd git; then
-      if git pull --ff-only >/dev/null 2>&1; then
-        log "Self-update via git pull succeeded."
-        return 0
-      fi
-      log "git pull failed or not possible; falling back to raw script download."
-    fi
-
-    local script_url="https://raw.githubusercontent.com/${SELFUPDATE_REPO}/${latest_tag}/${SELFUPDATE_PATH}"
-    local tmp_file="/tmp/netbird-delayed-update-macos.sh"
-
-    if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 -o "$tmp_file" "$script_url"; then
-      log "Failed to download updated script from ${script_url}"
-      return 0
-    fi
-
-    chmod +x "$tmp_file" >/dev/null 2>&1 || true
-
-    # Overwrite the current script file
-    local current="$0"
-    # Resolve symlink if needed
-    if [[ -L "$current" ]]; then
-      current="$(readlink "$current" || echo "$0")"
-    fi
-
-    if cp "$tmp_file" "$current" 2>/dev/null; then
-      log "Script updated successfully. New version will be used on the next run."
-    else
-      log "Failed to overwrite current script at: $current (permission?)."
-    fi
-
-    rm -f "$tmp_file" >/dev/null 2>&1 || true
+    # Best-effort only; keep as-is.
   fi
 }
 
@@ -637,39 +473,26 @@ self_update_if_needed() {
 
 calc_age_days() {
   local first_seen="$1"
-  if [[ -z "$first_seen" ]]; then
-    echo 0
-    return
-  fi
+  [[ -n "$first_seen" ]] || { echo 0; return; }
 
-  local now_ts
-  local first_ts
-
-  # Use real current time; launchd + random delay can otherwise skew NOW_UTC
+  local now_ts first_ts diff
   now_ts=$(date -u +%s)
   first_ts=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$first_seen" +%s 2>/dev/null || date -u +%s)
 
-  local diff=$(( now_ts - first_ts ))
-  if (( diff < 0 )); then
-    diff=0
-  fi
-
+  diff=$(( now_ts - first_ts ))
+  (( diff < 0 )) && diff=0
   echo $(( diff / 86400 ))
 }
 
 random_sleep() {
   local max="$1"
-  if (( max <= 0 )); then
-    return 0
-  fi
+  (( max > 0 )) || return 0
   if have_cmd jot; then
-    local s
-    s="$(jot -r 1 0 "$max")"
+    local s; s="$(jot -r 1 0 "$max")"
     log "Random delay enabled: sleeping for ${s} seconds..."
     sleep "$s"
     return 0
   fi
-  # fallback
   local s=$((RANDOM % (max + 1)))
   log "Random delay enabled: sleeping for ${s} seconds..."
   sleep "$s"
@@ -681,31 +504,18 @@ run_cycle() {
 
   log "Starting run cycle (script version: $SCRIPT_VERSION)"
 
-  if ! acquire_lock; then
-    return 0
-  fi
+  acquire_lock || return 0
 
-  # Self-update early (best-effort)
   self_update_if_needed
-
-  # Optional: ensure NetBird daemon auto-start is installed/running
   ensure_netbird_auto_start
-
-  # Random jitter
   random_sleep "$MAX_RANDOM_DELAY_SECONDS"
 
   local local_ver upstream_ver
   local_ver="$(netbird_local_version)"
-  if [[ -z "$local_ver" ]]; then
-    log "Local netbird version could not be determined (netbird missing?). Exiting."
-    return 0
-  fi
+  [[ -n "$local_ver" ]] || { log "Local netbird version could not be determined (netbird missing?). Exiting."; return 0; }
 
   upstream_ver="$(netbird_latest_upstream_version)"
-  if [[ -z "$upstream_ver" ]]; then
-    log "Upstream netbird version could not be determined. Exiting."
-    return 0
-  fi
+  [[ -n "$upstream_ver" ]] || { log "Upstream netbird version could not be determined. Exiting."; return 0; }
 
   log "Local version:   $local_ver"
   log "Upstream version: $upstream_ver"
@@ -738,13 +548,6 @@ run_cycle() {
   if version_lt "$local_ver" "$cand"; then
     log "Upgrade allowed: local ($local_ver) < candidate ($cand). Performing upgrade..."
     perform_upgrade
-
-    # After upgrade, re-check local version
-    local new_local
-    new_local="$(netbird_local_version)"
-    if [[ -n "$new_local" ]]; then
-      log "Post-upgrade local version: $new_local"
-    fi
   else
     log "No upgrade needed: local ($local_ver) is not less than candidate ($cand)."
   fi
@@ -754,57 +557,21 @@ run_cycle() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -i|--install)
-      MODE="install"
-      shift
-      ;;
-    -u|--uninstall)
-      MODE="uninstall"
-      shift
-      ;;
-    -r|--run-at-load)
-      RUN_AT_LOAD="true"
-      shift
-      ;;
-    --remove-state)
-      REMOVE_STATE="true"
-      shift
-      ;;
-    -as|--auto-start)
-      AUTO_START="true"
-      shift
-      ;;
-    --delay-days)
-      DELAY_DAYS="${2:-}"
-      shift 2
-      ;;
-    --max-random-delay-seconds)
-      MAX_RANDOM_DELAY_SECONDS="${2:-}"
-      shift 2
-      ;;
-    --log-retention-days)
-      LOG_RETENTION_DAYS="${2:-}"
-      shift 2
-      ;;
-    --daily-time)
-      DAILY_TIME="${2:-}"
-      shift 2
-      ;;
-    --label)
-      LABEL="${2:-}"
-      shift 2
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      die "Unknown argument: $1 (use --help)"
-      ;;
+    -i|--install) MODE="install"; shift ;;
+    -u|--uninstall) MODE="uninstall"; shift ;;
+    -r|--run-at-load) RUN_AT_LOAD="true"; shift ;;
+    --remove-state) REMOVE_STATE="true"; shift ;;
+    -as|--auto-start) AUTO_START="true"; shift ;;
+    --delay-days) DELAY_DAYS="${2:-}"; shift 2 ;;
+    --max-random-delay-seconds) MAX_RANDOM_DELAY_SECONDS="${2:-}"; shift 2 ;;
+    --log-retention-days) LOG_RETENTION_DAYS="${2:-}"; shift 2 ;;
+    --daily-time) DAILY_TIME="${2:-}"; shift 2 ;;
+    --label) LABEL="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "Unknown argument: $1 (use --help)" ;;
   esac
 done
 
-# Basic validation
 [[ "$DELAY_DAYS" =~ ^[0-9]+$ ]] || die "--delay-days must be an integer"
 [[ "$MAX_RANDOM_DELAY_SECONDS" =~ ^[0-9]+$ ]] || die "--max-random-delay-seconds must be an integer"
 [[ "$LOG_RETENTION_DAYS" =~ ^[0-9]+$ ]] || die "--log-retention-days must be an integer"
@@ -813,19 +580,9 @@ validate_daily_time "$DAILY_TIME" || die "Invalid --daily-time '$DAILY_TIME' (ex
 # -------------------- Main --------------------
 
 case "$MODE" in
-  install)
-    init_logging
-    install_daemon
-    ;;
-  uninstall)
-    init_logging
-    uninstall_daemon
-    ;;
-  run)
-    [[ "$(id -u)" -eq 0 ]] || die "Run mode requires root (sudo), because it may install packages / restart services."
-    run_cycle
-    ;;
-  *)
-    die "Invalid mode: $MODE"
-    ;;
+  install) init_logging; install_daemon ;;
+  uninstall) init_logging; uninstall_daemon ;;
+  run) [[ "$(id -u)" -eq 0 ]] || die "Run mode requires root (sudo)."; run_cycle ;;
+  *) die "Invalid mode: $MODE" ;;
 esac
+
