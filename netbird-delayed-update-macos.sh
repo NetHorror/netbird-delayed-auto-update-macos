@@ -43,6 +43,9 @@ SCRIPT_VERSION="0.1.4"
 SELFUPDATE_REPO="NetHorror/netbird-delayed-auto-update-macos"
 SELFUPDATE_PATH="netbird-delayed-update-macos.sh"
 
+# Lock stale policy: if lock exists, PID is not running, and lock age >= this -> remove lock
+LOCK_STALE_SECONDS=3600  # 1 hour
+
 # -------------------- Global runtime state --------------------
 
 MODE="run"
@@ -156,20 +159,78 @@ script_self_path() {
   resolve_path "$dir/$(basename "$src")"
 }
 
+# Robust lock: stores PID + creation time. Removes stale lock if PID is dead and lock is old.
 acquire_lock() {
-  # Prevent overlapping runs (e.g., manual run + launchd run)
-  : "${STATE_DIR:=/var/lib/netbird-delayed-update}"
   mkdir -p "$STATE_DIR"
 
   local lock_dir="${STATE_DIR}/.lock"
-  if ! mkdir "$lock_dir" 2>/dev/null; then
-    log "Another instance appears to be running (lock: $lock_dir). Exiting."
+  local pid_file="${lock_dir}/pid"
+  local ts_file="${lock_dir}/created_epoch"
+  local now
+  now="$(date +%s)"
+
+  local GRACE_SECONDS=15
+
+  if mkdir "$lock_dir" 2>/dev/null; then
+    echo "$$" > "$pid_file"
+    echo "$now" > "$ts_file"
+    trap "rm -rf \"$lock_dir\" 2>/dev/null || true" EXIT INT TERM HUP
+    return 0
+  fi
+
+  # lock already exists — read PID (if any)
+  local pid=""
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+
+  # If PID is alive, do not touch the lock.
+  if [[ -n "$pid" ]] && ps -p "$pid" >/dev/null 2>&1; then
+    # Optional: detect very old lock with live PID (hung process). We keep it to avoid concurrency.
+    local created_live=""
+    created_live="$(cat "$ts_file" 2>/dev/null || true)"
+    if [[ ! "$created_live" =~ ^[0-9]+$ ]]; then
+      created_live="$(stat -f %m "$lock_dir" 2>/dev/null || echo 0)"
+    fi
+    local age_live=$(( now - created_live ))
+    if (( age_live >= LOCK_STALE_SECONDS )); then
+      log "Lock is older than ${LOCK_STALE_SECONDS}s but PID $pid is still running. Leaving lock intact."
+    else
+      log "Another instance appears to be running (pid: $pid, lock: $lock_dir). Exiting."
+    fi
     return 1
   fi
 
-  # Expand $lock_dir at trap setup time to avoid set -u / scope issues later.
-  trap "rm -rf \"$lock_dir\" 2>/dev/null || true" EXIT INT TERM HUP
-  return 0
+  # PID is dead/missing — compute lock age
+  local created=""
+  created="$(cat "$ts_file" 2>/dev/null || true)"
+  if [[ ! "$created" =~ ^[0-9]+$ ]]; then
+    created="$(stat -f %m "$lock_dir" 2>/dev/null || echo 0)"
+  fi
+
+  local age=$(( now - created ))
+  if (( age < 0 )); then age=0; fi
+
+  # Grace period: avoid racing with another instance that just created lock but hasn't written pid yet.
+  if (( age < GRACE_SECONDS )); then
+    log "Lock exists but looks very recent (age ${age}s). Assuming it's being created; exiting."
+    return 1
+  fi
+
+  if (( age >= LOCK_STALE_SECONDS )); then
+    log "Stale lock detected (age ${age}s, pid '${pid:-none}'). Removing lock and retrying..."
+    rm -rf "$lock_dir" 2>/dev/null || true
+
+    if mkdir "$lock_dir" 2>/dev/null; then
+      echo "$$" > "$pid_file"
+      echo "$now" > "$ts_file"
+      trap "rm -rf \"$lock_dir\" 2>/dev/null || true" EXIT INT TERM HUP
+      return 0
+    fi
+    log "Failed to recreate lock after removing stale lock. Exiting."
+    return 1
+  fi
+
+  log "Lock exists (age ${age}s) and PID is not running, but not old enough to auto-remove. Exiting."
+  return 1
 }
 
 version_cmp() {
@@ -191,7 +252,6 @@ version_cmp() {
     [[ -n "${a1[i]:-}" ]] && n1="${a1[i]}"
     [[ -n "${a2[i]:-}" ]] && n2="${a2[i]}"
 
-    # Force base-10 to avoid octal interpretation for leading zeros (08/09).
     n1=$((10#$n1))
     n2=$((10#$n2))
 
@@ -272,13 +332,11 @@ netbird_latest_upstream_version() {
 }
 
 detect_install_type() {
-  # Prefer explicit Homebrew detection first, so Homebrew-cask UI installs
-  # don't get misclassified as "pkg" just because /Applications/NetBird.app exists.
+  # Prefer explicit Homebrew detection first
   if have_cmd brew; then
     if brew_has_formula "netbird" || brew_has_formula "netbirdio/tap/netbird"; then
       echo "brew_formula"; return
     fi
-    # `brew list --cask` usually shows the token (netbird-ui), but accept the tapped form too.
     if brew_has_cask "netbird-ui" || brew_has_cask "netbirdio/tap/netbird-ui"; then
       echo "brew_cask"; return
     fi
@@ -306,8 +364,6 @@ restart_netbird_service() {
 }
 
 refresh_netbird_service_registration_if_present() {
-  # For Homebrew formula installs, the daemon can remain bound to an old binary path after `brew upgrade`.
-  # Avoid creating a service if it wasn't installed already.
   have_cmd netbird || return 0
 
   local plist_found="false"
@@ -348,8 +404,6 @@ disable_netbird_auto_start() {
 # -------------------- Update mechanisms --------------------
 
 brew_owner_user() {
-  # Homebrew should normally be executed as a non-root user.
-  # Prefer the current console user when available; fall back to Homebrew prefix owner.
   local console_user=""
   console_user="$(stat -f "%Su" /dev/console 2>/dev/null || true)"
   if [[ -n "$console_user" && "$console_user" != "root" ]]; then
@@ -378,13 +432,11 @@ brew_as_owner() {
   local owner
   owner="$(brew_owner_user)"
 
-  # If we couldn't determine a user, try running directly (may fail if brew disallows root).
   if [[ -z "$owner" ]]; then
     brew "$@"
     return $?
   fi
 
-  # Homebrew may refuse to run as root; allow it only as a last resort.
   if [[ "$owner" == "root" ]]; then
     HOMEBREW_ALLOW_SUPERUSER=1 brew "$@"
     return $?
@@ -408,18 +460,11 @@ brew_has_cask() {
 }
 
 brew_upgrade_netbird() {
-  # arg: "formula" or "cask"
   local kind="${1:-formula}"
 
   have_cmd brew || die "Homebrew not found, but install type detected as brew."
 
-  local owner
-  owner="$(brew_owner_user)"
-  [[ -n "$owner" ]] || log "Warning: unable to determine Homebrew owner; will try running brew as current user."
-
   log "Upgrading NetBird via Homebrew (${kind})"
-
-  # Keep the tap/index reasonably fresh. Some environments disable auto-update; do it explicitly.
   brew_as_owner update >/dev/null 2>&1 || true
 
   if [[ "$kind" == "cask" ]]; then
@@ -436,7 +481,6 @@ brew_upgrade_netbird() {
     return 0
   fi
 
-  # formula
   local formula="netbirdio/tap/netbird"
   if brew_has_formula "netbird"; then
     formula="netbird"
@@ -447,9 +491,7 @@ brew_upgrade_netbird() {
   log "Upgrading Homebrew formula: $formula"
   brew_as_owner upgrade "$formula"
 
-  # Best-effort fix for cases where the running daemon stays on an old binary after brew upgrade.
   refresh_netbird_service_registration_if_present || true
-
   restart_netbird_service
 }
 
@@ -603,7 +645,6 @@ self_update_if_needed() {
   latest_tag="$(echo "$latest_tag" | tr -d '[:space:]')"
   [[ -n "$latest_tag" ]] || return 0
 
-  # Allow both vX.Y.Z and X.Y.Z tags.
   latest_tag="${latest_tag#v}"
 
   if ! version_gt "$latest_tag" "$SCRIPT_VERSION"; then
@@ -644,7 +685,6 @@ self_update_if_needed() {
     return 0
   fi
 
-  # Basic sanity: ensure the downloaded script declares the expected version.
   if ! grep -q "SCRIPT_VERSION=\"${latest_tag}\"" "$tmp" 2>/dev/null; then
     log "Self-update: sanity check failed (SCRIPT_VERSION mismatch); aborting."
     rm -f "$tmp" >/dev/null 2>&1 || true
