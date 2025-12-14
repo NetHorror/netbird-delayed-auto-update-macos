@@ -728,14 +728,23 @@ calc_age_days() {
 random_sleep() {
   local max="$1"
   (( max > 0 )) || return 0
+
+  local s
   if have_cmd jot; then
-    local s; s="$(jot -r 1 0 "$max")"
-    log "Random delay enabled: sleeping for ${s} seconds..."
-    sleep "$s"
-    return 0
+    s="$(jot -r 1 0 "$max")"
+  else
+    s=$((RANDOM % (max + 1)))
   fi
-  local s=$((RANDOM % (max + 1)))
-  log "Random delay enabled: sleeping for ${s} seconds..."
+
+  local now_epoch wake_epoch now_local wake_local
+  now_epoch="$(date +%s)"
+  wake_epoch=$((now_epoch + s))
+
+  # Local time (machine timezone)
+  now_local="$(date "+%Y-%m-%d %H:%M:%S %Z")"
+  wake_local="$(date -r "$wake_epoch" "+%Y-%m-%d %H:%M:%S %Z")"
+
+  log "Random delay enabled: now ${now_local}; sleeping ${s}s until ${wake_local}..."
   sleep "$s"
 }
 
