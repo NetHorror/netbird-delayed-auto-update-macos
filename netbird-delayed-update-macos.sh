@@ -171,6 +171,9 @@ script_self_path() {
 
 # Robust lock: stores PID + creation time.
 # Removes stale lock if PID is dead and lock age >= LOCK_STALE_SECONDS.
+# Improvements:
+# - If lock predates last reboot, it is removed immediately (PID is already checked dead).
+# - If lock is not old enough, logs remaining seconds + local time when it becomes stale.
 acquire_lock() {
   mkdir -p "$STATE_DIR"
 
@@ -215,6 +218,27 @@ acquire_lock() {
     return 1
   fi
 
+  # If lock was created before the last reboot, it can't belong to a live process.
+  local boot_sec="0"
+  boot_sec="$(sysctl -n kern.boottime 2>/dev/null | sed -E 's/.*sec = ([0-9]+).*/\1/' || echo 0)"
+  [[ "$boot_sec" =~ ^[0-9]+$ ]] || boot_sec=0
+
+  if (( boot_sec > 0 )) && [[ "$created" =~ ^[0-9]+$ ]] && (( created < boot_sec )); then
+    log "Stale lock detected: lock predates last reboot (created_epoch=${created}, boot_epoch=${boot_sec}). Removing immediately and retrying..."
+    rm -rf "$lock_dir" 2>/dev/null || true
+
+    if mkdir "$lock_dir" 2>/dev/null; then
+      echo "$$" > "$pid_file"
+      echo "$now" > "$ts_file"
+      trap "rm -rf \"$lock_dir\" 2>/dev/null || true" EXIT INT TERM HUP
+      return 0
+    fi
+
+    log "Failed to recreate lock after removing reboot-stale lock. Exiting."
+    return 1
+  fi
+
+  # TTL behavior (same-boot stale lock)
   if (( age >= LOCK_STALE_SECONDS )); then
     log "Stale lock detected (age ${age}s >= ${LOCK_STALE_SECONDS}s, pid '${pid:-none}'). Removing lock and retrying..."
     rm -rf "$lock_dir" 2>/dev/null || true
@@ -230,7 +254,13 @@ acquire_lock() {
     return 1
   fi
 
-  log "Lock exists (age ${age}s) and PID is not running, but not old enough to auto-remove. Exiting."
+  # Log how long remains + local time when it becomes stale
+  local remaining=$(( LOCK_STALE_SECONDS - age ))
+  local eligible_epoch=$(( created + LOCK_STALE_SECONDS ))
+  local eligible_local
+  eligible_local="$(date -r "$eligible_epoch" "+%Y-%m-%d %H:%M:%S %Z" 2>/dev/null || echo "unknown")"
+
+  log "Lock exists (age ${age}s), PID is not running, but not old enough to auto-remove. Will be stale in ${remaining}s at ${eligible_local}. Exiting."
   return 1
 }
 
@@ -740,7 +770,7 @@ random_sleep() {
   now_epoch="$(date +%s)"
   wake_epoch=$((now_epoch + s))
 
-  # Local time (machine timezone)
+  # Local time (machine timezone / what you see in SSH)
   now_local="$(date "+%Y-%m-%d %H:%M:%S %Z")"
   wake_local="$(date -r "$wake_epoch" "+%Y-%m-%d %H:%M:%S %Z")"
 
