@@ -670,6 +670,7 @@ uninstall_daemon() {
 }
 
 # -------------------- Script self-update (best-effort) --------------------
+# IMPORTANT: update is ATOMIC (download to temp in same dir, then mv).
 
 self_update_if_needed() {
   have_cmd curl || return 0
@@ -689,9 +690,10 @@ self_update_if_needed() {
 
   log "Newer script version available: $latest_tag (current: $SCRIPT_VERSION). Attempting self-update..."
 
-  local self_path script_dir
+  local self_path script_dir base
   self_path="$(script_self_path)"
   script_dir="$(dirname "$self_path")"
+  base="$(basename "$self_path")"
 
   # 1) If we're inside a git checkout, try `git pull --ff-only` first.
   if have_cmd git && git -C "$script_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -703,10 +705,13 @@ self_update_if_needed() {
     log "Self-update: git pull failed; falling back to raw download."
   fi
 
-  # 2) Download the script from the tagged release and overwrite ourselves.
-  local url tmp
+  # 2) Download the script from the tagged release and atomically overwrite ourselves.
+  local url tmp backup
   url="https://raw.githubusercontent.com/${SELFUPDATE_REPO}/${latest_tag}/${SELFUPDATE_PATH}"
-  tmp="$(mktemp "${STATE_DIR}/selfupdate.XXXXXX")"
+
+  # Temp file MUST be in the same directory as the target for atomic mv.
+  tmp="$(mktemp "${script_dir}/.${base}.new.XXXXXX")"
+  backup="${self_path}.bak-$(date -u +%Y%m%d-%H%M%S)"
 
   log "Self-update: downloading ${url}"
   if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 -o "$tmp" "$url"; then
@@ -721,23 +726,29 @@ self_update_if_needed() {
     return 0
   fi
 
-  # NOTE: if you release tags, ensure the script's SCRIPT_VERSION matches the tag,
-  # otherwise this check will (intentionally) refuse to overwrite.
+  # Sanity check: ensure the downloaded script's SCRIPT_VERSION matches the tag.
   if ! grep -q "SCRIPT_VERSION=\"${latest_tag}\"" "$tmp" 2>/dev/null; then
     log "Self-update: sanity check failed (SCRIPT_VERSION mismatch); aborting."
     rm -f "$tmp" >/dev/null 2>&1 || true
     return 0
   fi
 
-  local backup="${self_path}.bak-$(date -u +%Y%m%d-%H%M%S)"
+  # Backup current script (best-effort)
   cp -f "$self_path" "$backup" >/dev/null 2>&1 || true
 
-  cp -f "$tmp" "$self_path"
-  chmod 755 "$self_path" >/dev/null 2>&1 || true
-  chown root:wheel "$self_path" >/dev/null 2>&1 || true
-  rm -f "$tmp" >/dev/null 2>&1 || true
+  # Prepare permissions/ownership on the temp file before swapping in.
+  chmod 755 "$tmp" >/dev/null 2>&1 || true
+  chown root:wheel "$tmp" >/dev/null 2>&1 || true
 
-  log "Self-update: updated script written to $self_path (backup: $backup). New version will run next cycle."
+  # Atomic replace
+  if mv -f "$tmp" "$self_path" 2>/dev/null; then
+    log "Self-update: updated script written to $self_path (backup: $backup). New version will run next cycle."
+    return 0
+  fi
+
+  log "Self-update: failed to atomically replace $self_path. Keeping current script."
+  rm -f "$tmp" >/dev/null 2>&1 || true
+  return 0
 }
 
 # -------------------- Delayed update logic --------------------
