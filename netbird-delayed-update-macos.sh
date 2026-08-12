@@ -47,7 +47,7 @@ AUTO_START="false"
 REMOVE_NETBIRD_AUTOSTART="false"
 
 # Script self-update (best-effort)
-SCRIPT_VERSION="0.1.4"
+SCRIPT_VERSION="0.1.5"
 SELFUPDATE_REPO="NetHorror/netbird-delayed-auto-update-macos"
 SELFUPDATE_PATH="netbird-delayed-update-macos.sh"
 
