@@ -1,3 +1,10 @@
+## [0.1.5] - 2026-08-12
+
+### ✨ Added
+
+* 🤖 CI workflow (GitHub Actions): syntax check, ShellCheck, an install/uninstall LaunchDaemon smoke test, and a check that release tags match `SCRIPT_VERSION`.
+* 🔗 `README.md` cross-links to the Windows and Linux sibling projects.
+
 ## [0.1.4] - 2025-12-14
 
 ### ✨ Added

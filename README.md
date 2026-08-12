@@ -210,4 +210,10 @@ So NetBird (and this updater) cannot run before the disk is unlocked.
 - `--remove-netbird-auto-start` (with `--uninstall`, explicitly removes NetBird daemon auto-start)
 - `--help`
 
+---
+
+## Related projects
+
+- Windows (Chocolatey + Scheduled Task): [`NetHorror/netbird-delayed-auto-update-windows`](https://github.com/NetHorror/netbird-delayed-auto-update-windows)
+- Linux (APT + systemd): [`NetHorror/netbird-delayed-auto-update-linux`](https://github.com/NetHorror/netbird-delayed-auto-update-linux)
 
