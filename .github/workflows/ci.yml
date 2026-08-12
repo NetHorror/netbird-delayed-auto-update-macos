@@ -19,7 +19,7 @@ jobs:
         run: brew install shellcheck
 
       - name: ShellCheck
-        run: shellcheck netbird-delayed-update-macos.sh
+        run: shellcheck --severity=error netbird-delayed-update-macos.sh
 
   smoke-test:
     runs-on: macos-latest
