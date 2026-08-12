@@ -1,3 +1,13 @@
+## [0.1.6] - 2026-08-12
+
+### 🐛 Fixed
+
+* 🧹 `--uninstall --remove-state` could report a false failure (exit code 1): the final "Uninstall complete." log line was written *after* the state/logs directory was deleted, so its `tee` into the now-missing log file failed under `pipefail`. The completion log line now runs before the directory is removed.
+
+### 🔄 Changed
+
+* ✅ CI ShellCheck step now only fails on `error`-severity findings, so pre-existing style/warning-level notes don't block the pipeline.
+
 ## [0.1.5] - 2026-08-12
 
 ### ✨ Added

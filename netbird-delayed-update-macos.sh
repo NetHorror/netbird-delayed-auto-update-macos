@@ -47,7 +47,7 @@ AUTO_START="false"
 REMOVE_NETBIRD_AUTOSTART="false"
 
 # Script self-update (best-effort)
-SCRIPT_VERSION="0.1.5"
+SCRIPT_VERSION="0.1.6"
 SELFUPDATE_REPO="NetHorror/netbird-delayed-auto-update-macos"
 SELFUPDATE_PATH="netbird-delayed-update-macos.sh"
 
@@ -661,12 +661,12 @@ uninstall_daemon() {
     log "Not touching NetBird service auto-start (use --remove-netbird-auto-start to remove it)."
   fi
 
+  log "Uninstall complete."
+
   if [[ "$REMOVE_STATE" == "true" ]]; then
     log "Removing state/logs directory: $STATE_DIR"
     rm -rf "$STATE_DIR" || true
   fi
-
-  log "Uninstall complete."
 }
 
 # -------------------- Script self-update (best-effort) --------------------
