@@ -1,3 +1,21 @@
+## [0.2.0] - 2026-11-08
+
+### ✨ Added
+
+* 📦 NetBird client detection and first install: if `netbird` is missing, a terminal run asks `NetBird not found. Install now? [Y/n]`; `--install-client` installs without asking; under launchd only a `WARNING` is logged (exit 0). Install via `brew install netbirdio/tap/netbird` (as the Homebrew owner) or, without Homebrew, the official pkg after a `NetBird GmbH` signature check. **A first install takes the current latest version; the delay applies only to updates.**
+* 🚫 `--no-self-update` disables script self-update (also written into the LaunchDaemon when given with `--install`).
+
+### 🔒 Security
+
+* 🔁 Self-update rewritten: it downloads the `netbird-delayed-update-macos.sh` and `SHA256SUMS` assets of the latest GitHub release (tag must be `X.Y.Z` and newer), verifies the sha256 and `SCRIPT_VERSION`, keeps a `.bak-<timestamp>` backup, and swaps the file atomically (`755`, `root:wheel`). `git pull` as root and the raw-by-tag download are removed.
+* 📦 The pkg path checks the `NetBird GmbH` signature and the matured version before `installer` runs; Homebrew upgrades only when the formula offers exactly the matured version.
+* 🗂️ `--install` copies the script to `/usr/local/sbin/netbird-delayed-update-macos.sh` (`root:wheel`) and the LaunchDaemon runs that copy.
+
+### 🔄 Changed
+
+* 🏷️ Header `# Version:` now matches `SCRIPT_VERSION` (CI checks it).
+* ✅ CI: `--help` check; smoke test runs with `--no-self-update` and asserts the missing-client `WARNING` without installing anything.
+
 ## [0.1.6] - 2026-08-12
 
 ### 🐛 Fixed

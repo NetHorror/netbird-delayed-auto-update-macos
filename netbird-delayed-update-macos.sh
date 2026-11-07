@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
-# Version: 0.1.4
+# Version: 0.2.0
 #
 # NetBird Delayed Auto-Update for macOS
 #
 # Delayed (staged) auto-update for the NetBird client on macOS.
+#
+# 0.2.0:
+# - Detects a missing NetBird client and can install it (prompt on a terminal,
+#   or --install-client). A first install takes the current latest version;
+#   the delay applies only to updates.
+# - Self-update downloads release assets and verifies them against SHA256SUMS
+#   (no more `git pull` as root). Disable with --no-self-update.
 #
 # IMPORTANT SAFETY CHANGE (0.1.4 republish):
 # - `--uninstall` ONLY removes this script's LaunchDaemon.
@@ -47,10 +54,16 @@ AUTO_START="false"
 # Only used with --uninstall when explicitly requested
 REMOVE_NETBIRD_AUTOSTART="false"
 
-# Script self-update (best-effort)
-SCRIPT_VERSION="0.1.6"
+# Install the NetBird client without asking if it is missing
+INSTALL_CLIENT="false"
+
+# Script self-update (best-effort). Keep this exact line format:
+# 0.1.x copies verify `SCRIPT_VERSION="<tag>"` in the raw file of the tag.
+SCRIPT_VERSION="0.2.0"
+SELF_UPDATE="true"
 SELFUPDATE_REPO="NetHorror/netbird-delayed-auto-update-macos"
-SELFUPDATE_PATH="netbird-delayed-update-macos.sh"
+SELFUPDATE_ASSET="netbird-delayed-update-macos.sh"
+SELFUPDATE_SUMS_ASSET="SHA256SUMS"
 
 # Lock stale policy:
 # will be set to MAX_RANDOM_DELAY_SECONDS after args parsing; initialize to default
@@ -85,7 +98,11 @@ Options:
   -as, --auto-start               Ensure NetBird daemon is installed/started as a system service
   --remove-state                  With --uninstall: remove /var/lib/netbird-delayed-update
   --remove-netbird-auto-start     With --uninstall: ALSO stop+uninstall NetBird daemon service
-  -h, --help                      Show help and exit
+  --install-client                Install the NetBird client if missing, without asking
+                                  (first install = current latest version; the delay
+                                  applies only to updates)
+  --no-self-update                Do not update this script from GitHub releases
+  -h, --help                     Show help and exit
 EOF
 }
 
@@ -607,6 +624,66 @@ perform_upgrade() {
   esac
 }
 
+# -------------------- NetBird client presence / first install --------------------
+
+netbird_client_present() {
+  have_cmd netbird && return 0
+  # Installed but not in PATH (e.g. app bundle only, or a brew formula/cask).
+  [[ "$(detect_install_type)" != "other" ]] && return 0
+  pkgutil --pkgs 2>/dev/null | grep -qi 'netbird' && return 0
+  return 1
+}
+
+# First install: takes the CURRENT LATEST version. The delay window applies
+# only to later updates, not to the initial install.
+install_netbird_client() {
+  [[ "$(id -u)" -eq 0 ]] || die "Installing the NetBird client requires root (sudo)."
+  log "Installing NetBird client. A first install takes the current latest version; the ${DELAY_DAYS}-day delay applies only to later updates."
+
+  if have_cmd brew; then
+    log "Installing via Homebrew: netbirdio/tap/netbird"
+    brew_as_owner install netbirdio/tap/netbird || die "Homebrew install of netbirdio/tap/netbird failed."
+    hash -r
+    if have_cmd netbird; then
+      log "Registering and starting the NetBird daemon service..."
+      netbird service install >/dev/null 2>&1 || true
+      netbird service start >/dev/null 2>&1 || true
+    fi
+  else
+    # No target version: install whatever pkgs.netbird.io serves now, after
+    # the NetBird GmbH signature check in pkg_upgrade_netbird.
+    pkg_upgrade_netbird ""
+    hash -r
+  fi
+
+  have_cmd netbird || die "NetBird install finished, but 'netbird' is still not in PATH."
+  log "NetBird client installed: $(netbird version 2>/dev/null | head -n1 || true)"
+}
+
+# Returns 0 if the client is (now) present, 1 if it is missing and was not installed.
+ensure_netbird_client() {
+  netbird_client_present && return 0
+
+  if [[ "$INSTALL_CLIENT" == "true" ]]; then
+    log "NetBird client not found; installing (--install-client)."
+    install_netbird_client
+    return 0
+  fi
+
+  if [[ -t 0 ]]; then
+    local answer=""
+    read -r -p "NetBird not found. Install now? [Y/n] " answer || answer="n"
+    case "$answer" in
+      ""|[Yy]|[Yy][Ee][Ss]) install_netbird_client; return 0 ;;
+    esac
+    log "NetBird client not installed (declined)."
+    return 1
+  fi
+
+  log "WARNING: NetBird client not found; not installing in non-interactive mode (run from a terminal or pass --install-client)."
+  return 1
+}
+
 # -------------------- LaunchDaemon management --------------------
 
 plist_path() { echo "/Library/LaunchDaemons/${LABEL}.plist"; }
@@ -626,6 +703,8 @@ render_plist() {
     <string>--label</string><string>${LABEL}</string>"
   [[ "$AUTO_START" == "true" ]] && args_xml="${args_xml}
     <string>--auto-start</string>"
+  [[ "$SELF_UPDATE" == "true" ]] || args_xml="${args_xml}
+    <string>--no-self-update</string>"
 
   cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -691,6 +770,7 @@ install_daemon() {
   launchctl_bootstrap_or_load
 
   log "LaunchDaemon installed and loaded."
+  ensure_netbird_client || true
   ensure_netbird_auto_start
 }
 
@@ -723,83 +803,152 @@ uninstall_daemon() {
 }
 
 # -------------------- Script self-update (best-effort) --------------------
-# IMPORTANT: update is ATOMIC (download to temp in same dir, then mv).
+# Protocol (0.2.0+):
+#  1. GET releases/latest -> tag_name; version = tag without a leading "v",
+#     must be X.Y.Z and newer than SCRIPT_VERSION.
+#  2. Take the browser_download_url of the release assets
+#     `netbird-delayed-update-macos.sh` and `SHA256SUMS`.
+#  3. Download both next to the target file, verify the script's sha256 against
+#     the SHA256SUMS line for its exact file name, and require
+#     `SCRIPT_VERSION="<version>"` inside it.
+#  4. Backup, then atomic mv; mode 755, owner root:wheel.
+# Any failure leaves the current script untouched; the run continues.
+
+# Print the browser_download_url of release asset $2 from release JSON $1.
+release_asset_url() {
+  local json="$1" name="$2"
+  local prefix="https://github.com/${SELFUPDATE_REPO}/releases/download/"
+  printf '%s\n' "$json" \
+    | grep -Eo '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+"' \
+    | sed -E 's/.*"([^"]+)"$/\1/' \
+    | while IFS= read -r u; do
+        if [[ "$u" == "$prefix"* && "${u##*/}" == "$name" ]]; then
+          echo "$u"
+          break
+        fi
+      done || true
+}
+
+# Print the lowercase sha256 recorded for file name $2 in SHA256SUMS file $1.
+sums_lookup() {
+  local sums="$1" name="$2"
+  tr -d '\r' <"$sums" | awk -v n="$name" '
+    { f = $2; sub(/^\*/, "", f); if (NF == 2 && f == n) { print tolower($1); exit } }'
+}
+
+file_sha256() {
+  shasum -a 256 "$1" 2>/dev/null | awk '{print tolower($1)}'
+}
 
 self_update_if_needed() {
+  [[ "$SELF_UPDATE" == "true" ]] || { log "Self-update disabled (--no-self-update)."; return 0; }
   have_cmd curl || return 0
 
   local api="https://api.github.com/repos/${SELFUPDATE_REPO}/releases/latest"
-  local latest_tag
-  latest_tag="$(curl_fetch "$api" 2>/dev/null | grep -E '"tag_name"[[:space:]]*:' | head -n1 \
-    | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)"
-  latest_tag="$(echo "$latest_tag" | tr -d '[:space:]')"
-  [[ -n "$latest_tag" ]] || return 0
+  local release_json latest_tag latest_ver
+  release_json="$(curl_fetch "$api" 2>/dev/null || true)"
+  latest_tag="$(printf '%s\n' "$release_json" | grep -Eo '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
+    | sed -E 's/.*"([^"]+)"$/\1/' || true)"
+  [[ -n "$latest_tag" ]] || { log "Self-update: could not read the latest release tag; skipping."; return 0; }
 
-  latest_tag="${latest_tag#v}"
-
-  if ! version_gt "$latest_tag" "$SCRIPT_VERSION"; then
+  latest_ver="${latest_tag#v}"
+  if [[ ! "$latest_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    log "Self-update: latest release tag '${latest_tag}' is not X.Y.Z; skipping."
     return 0
   fi
 
-  log "Newer script version available: $latest_tag (current: $SCRIPT_VERSION). Attempting self-update..."
+  version_gt "$latest_ver" "$SCRIPT_VERSION" || return 0
 
-  local self_path script_dir base
-  self_path="$(script_self_path)"
-  script_dir="$(dirname "$self_path")"
-  base="$(basename "$self_path")"
+  log "Newer script version available: $latest_ver (current: $SCRIPT_VERSION). Attempting self-update..."
 
-  # 1) If we're inside a git checkout, try `git pull --ff-only` first.
-  if have_cmd git && git -C "$script_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    log "Self-update: attempting git pull --ff-only in $script_dir"
-    if git -C "$script_dir" pull --ff-only >/dev/null 2>&1; then
-      log "Self-update: git pull completed. Updated script will be used on the next run."
-      return 0
-    fi
-    log "Self-update: git pull failed; falling back to raw download."
+  local script_url sums_url
+  script_url="$(release_asset_url "$release_json" "$SELFUPDATE_ASSET")"
+  sums_url="$(release_asset_url "$release_json" "$SELFUPDATE_SUMS_ASSET")"
+  if [[ -z "$script_url" || -z "$sums_url" ]]; then
+    log "Self-update: release ${latest_tag} lacks the '${SELFUPDATE_ASSET}' and/or '${SELFUPDATE_SUMS_ASSET}' asset; keeping current script."
+    return 0
   fi
 
-  # 2) Download the script from the tagged release and atomically overwrite ourselves.
-  local url tmp backup
-  url="https://raw.githubusercontent.com/${SELFUPDATE_REPO}/${latest_tag}/${SELFUPDATE_PATH}"
+  # Update the file that is running: the root-owned copy in /usr/local/sbin
+  # when launched from there (LaunchDaemon), otherwise the current file.
+  local self_path target script_dir base
+  self_path="$(script_self_path)"
+  target="$self_path"
+  [[ "$self_path" == "$INSTALLED_SCRIPT_PATH" ]] && target="$INSTALLED_SCRIPT_PATH"
+  script_dir="$(dirname "$target")"
+  base="$(basename "$target")"
 
-  # Temp file MUST be in the same directory as the target for atomic mv.
-  tmp="$(mktemp "${script_dir}/.${base}.new.XXXXXX")"
-  backup="${self_path}.bak-$(date -u +%Y%m%d-%H%M%S)"
+  # Temp files MUST be in the same directory as the target for an atomic mv.
+  local tmp tmp_sums
+  tmp="$(mktemp "${script_dir}/.${base}.new.XXXXXX")" \
+    || { log "Self-update: cannot create a temp file in ${script_dir}; skipping."; return 0; }
+  tmp_sums="$(mktemp "${script_dir}/.${base}.sums.XXXXXX")" \
+    || { rm -f "$tmp"; log "Self-update: cannot create a temp file in ${script_dir}; skipping."; return 0; }
 
-  log "Self-update: downloading ${url}"
-  if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 -o "$tmp" "$url"; then
+  log "Self-update: downloading ${script_url}"
+  if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 -o "$tmp" "$script_url" \
+     || ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 -o "$tmp_sums" "$sums_url"; then
     log "Self-update: download failed; keeping current script."
+    rm -f "$tmp" "$tmp_sums" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  local expected actual
+  expected="$(sums_lookup "$tmp_sums" "$SELFUPDATE_ASSET" || true)"
+  actual="$(file_sha256 "$tmp" || true)"
+  rm -f "$tmp_sums" >/dev/null 2>&1 || true
+
+  if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+    log "ERROR: Self-update: no valid sha256 for '${SELFUPDATE_ASSET}' in ${SELFUPDATE_SUMS_ASSET}; keeping current script."
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 0
+  fi
+  if [[ "$actual" != "$expected" ]]; then
+    log "ERROR: Self-update: sha256 mismatch (expected ${expected}, got ${actual:-none}); keeping current script."
     rm -f "$tmp" >/dev/null 2>&1 || true
     return 0
   fi
 
   if ! head -n 1 "$tmp" | grep -q '^#!/usr/bin/env bash'; then
-    log "Self-update: downloaded file doesn't look like a bash script; aborting."
+    log "ERROR: Self-update: downloaded file doesn't look like a bash script; keeping current script."
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 0
+  fi
+  if ! grep -qF "SCRIPT_VERSION=\"${latest_ver}\"" "$tmp" 2>/dev/null; then
+    log "ERROR: Self-update: downloaded script does not declare SCRIPT_VERSION=\"${latest_ver}\"; keeping current script."
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 0
+  fi
+  if ! bash -n "$tmp" 2>/dev/null; then
+    log "ERROR: Self-update: downloaded script fails 'bash -n'; keeping current script."
     rm -f "$tmp" >/dev/null 2>&1 || true
     return 0
   fi
 
-  # Sanity check: ensure the downloaded script's SCRIPT_VERSION matches the tag.
-  if ! grep -q "SCRIPT_VERSION=\"${latest_tag}\"" "$tmp" 2>/dev/null; then
-    log "Self-update: sanity check failed (SCRIPT_VERSION mismatch); aborting."
+  # Set mode/owner on the temp file first, so the file swapped in is never
+  # writable by anyone but root.
+  if ! chmod 755 "$tmp" 2>/dev/null || ! chown root:wheel "$tmp" 2>/dev/null; then
+    log "ERROR: Self-update: cannot set mode 755 / owner root:wheel; keeping current script."
     rm -f "$tmp" >/dev/null 2>&1 || true
     return 0
   fi
 
-  # Backup current script (best-effort)
-  cp -f "$self_path" "$backup" >/dev/null 2>&1 || true
-
-  # Prepare permissions/ownership on the temp file before swapping in.
-  chmod 755 "$tmp" >/dev/null 2>&1 || true
-  chown root:wheel "$tmp" >/dev/null 2>&1 || true
-
-  # Atomic replace
-  if mv -f "$tmp" "$self_path" 2>/dev/null; then
-    log "Self-update: updated script written to $self_path (backup: $backup). New version will run next cycle."
+  local backup
+  backup="${target}.bak-$(date -u +%Y%m%d-%H%M%S)"
+  if ! cp -p "$target" "$backup" 2>/dev/null; then
+    log "ERROR: Self-update: cannot write backup ${backup}; keeping current script."
+    rm -f "$tmp" >/dev/null 2>&1 || true
     return 0
   fi
 
-  log "Self-update: failed to atomically replace $self_path. Keeping current script."
+  if mv -f "$tmp" "$target" 2>/dev/null; then
+    chmod 755 "$target" 2>/dev/null || true
+    chown root:wheel "$target" 2>/dev/null || true
+    log "Self-update: ${target} updated to ${latest_ver} (sha256 verified; backup: ${backup}). New version will run next cycle."
+    return 0
+  fi
+
+  log "ERROR: Self-update: failed to atomically replace ${target}. Keeping current script."
   rm -f "$tmp" >/dev/null 2>&1 || true
   return 0
 }
@@ -852,6 +1001,9 @@ run_cycle() {
   acquire_lock || return 0
 
   self_update_if_needed
+  # Missing client: prompt on a terminal / install with --install-client;
+  # under launchd only a WARNING is logged and the run ends with exit 0.
+  ensure_netbird_client || return 0
   ensure_netbird_auto_start
   random_sleep "$MAX_RANDOM_DELAY_SECONDS"
 
@@ -908,6 +1060,8 @@ while [[ $# -gt 0 ]]; do
     --remove-state) REMOVE_STATE="true"; shift ;;
     --remove-netbird-auto-start) REMOVE_NETBIRD_AUTOSTART="true"; shift ;;
     -as|--auto-start) AUTO_START="true"; shift ;;
+    --install-client) INSTALL_CLIENT="true"; shift ;;
+    --no-self-update) SELF_UPDATE="false"; shift ;;
     --delay-days) DELAY_DAYS="${2:-}"; shift 2 ;;
     --max-random-delay-seconds) MAX_RANDOM_DELAY_SECONDS="${2:-}"; shift 2 ;;
     --log-retention-days) LOG_RETENTION_DAYS="${2:-}"; shift 2 ;;

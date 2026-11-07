@@ -16,7 +16,21 @@ FileVault is enabled — see below).
 
 > ⚠️ FileVault note: if FileVault is enabled, you must unlock the disk at the FileVault prompt first. No VPN/launchd service can run *before* that.
 
-### Option A: clone the repository
+### One-line install (release asset + SHA256 check)
+
+Downloads the script and `SHA256SUMS` from the GitHub release, verifies the checksum, and installs
+the LaunchDaemon. If NetBird is not installed, you are asked whether to install it now:
+
+~~~bash
+VER=0.2.0; B="https://github.com/NetHorror/netbird-delayed-auto-update-macos/releases/download/${VER}"; cd "$(mktemp -d)" && curl -fsSLO "$B/netbird-delayed-update-macos.sh" && curl -fsSLO "$B/SHA256SUMS" && grep -E ' \*?netbird-delayed-update-macos\.sh$' SHA256SUMS | shasum -a 256 -c - && sudo bash ./netbird-delayed-update-macos.sh --install --run-at-load
+~~~
+
+Add `--install-client` to install NetBird without the question (e.g. in MDM/unattended setups).
+
+`--install` copies the script to `/usr/local/sbin/netbird-delayed-update-macos.sh` (`root:wheel`, `755`),
+and the LaunchDaemon always runs that copy.
+
+### Alternative: clone the repository
 
 ~~~bash
 git clone https://github.com/NetHorror/netbird-delayed-auto-update-macos.git
@@ -25,31 +39,17 @@ chmod +x ./netbird-delayed-update-macos.sh
 sudo ./netbird-delayed-update-macos.sh --install --run-at-load
 ~~~
 
-### Option B: download the tagged script
+### NetBird client: first install vs. updates
 
-~~~bash
-VERSION="0.1.4"
-
-curl -fsSL -o netbird-delayed-update-macos.sh \
-  "https://raw.githubusercontent.com/NetHorror/netbird-delayed-auto-update-macos/${VERSION}/netbird-delayed-update-macos.sh"
-
-chmod +x ./netbird-delayed-update-macos.sh
-sudo ./netbird-delayed-update-macos.sh --install --run-at-load
-~~~
-
----
-
-## Recommended: install to a stable path
-
-So that your LaunchDaemon always points to a consistent location:
-
-~~~bash
-sudo mkdir -p /usr/local/sbin
-sudo install -m 755 ./netbird-delayed-update-macos.sh /usr/local/sbin/netbird-delayed-update-macos.sh
-
-sudo /usr/local/sbin/netbird-delayed-update-macos.sh --uninstall
-sudo /usr/local/sbin/netbird-delayed-update-macos.sh --install --run-at-load
-~~~
+- If the `netbird` client is missing and the script runs **from a terminal**, it asks
+  `NetBird not found. Install now? [Y/n]` (Enter = yes).
+- With `--install-client` it installs without asking.
+- Under launchd (no terminal) it never installs: it logs a `WARNING` and exits with code 0.
+- Install method: Homebrew (`brew install netbirdio/tap/netbird`, run as the Homebrew owner) if `brew`
+  exists; otherwise the official pkg from `https://pkgs.netbird.io/macos/<arch>`, installed only if
+  `pkgutil --check-signature` shows `NetBird GmbH`.
+- ⚠️ **A first install takes the current latest NetBird version.** The `--delay-days` window applies
+  only to *updates* of an already installed client.
 
 ---
 
@@ -90,10 +90,15 @@ sudo /usr/local/sbin/netbird-delayed-update-macos.sh --install --run-at-load
     - If the lock predates the last reboot, it is removed immediately
     - If it is not stale yet, the script logs how long remains and the local time it becomes stale
 
-- **Self-update (best-effort)**
-  - Checks the latest GitHub release and may update itself (git pull / tagged raw download)
-  - Failures are logged and the run continues (no hard failure)
-  - The updated script is used on the next run
+- **Self-update (best-effort, on by default)**
+  - Checks the latest GitHub release (`X.Y.Z` tag, newer than the running version)
+  - Downloads the release assets `netbird-delayed-update-macos.sh` and `SHA256SUMS`, and replaces the
+    script only if the sha256 matches and the file declares the release version
+  - Updates `/usr/local/sbin/netbird-delayed-update-macos.sh` when run from there (otherwise the running file);
+    keeps a `<path>.bak-<timestamp>` backup; atomic `mv`, `755`, `root:wheel`
+  - No `git pull` as root
+  - Failures are logged and the run continues (no hard failure); the updated script is used on the next run
+  - Disable with `--no-self-update` (also written into the LaunchDaemon when given with `--install`)
 
 - **Safety fix**
   - `--uninstall` removes only this script’s LaunchDaemon by default and does **not** touch NetBird
@@ -208,7 +213,17 @@ So NetBird (and this updater) cannot run before the disk is unlocked.
 - `--run-at-load` (with `--install`)
 - `--remove-state` (with `--uninstall`)
 - `--remove-netbird-auto-start` (with `--uninstall`, explicitly removes NetBird daemon auto-start)
+- `--install-client` (install the NetBird client if missing, without asking; first install = latest version)
+- `--no-self-update` (do not update this script from GitHub releases)
 - `--help`
+
+---
+
+## Releasing (maintainers)
+
+Self-update of 0.2.0+ needs two assets on every release: `netbird-delayed-update-macos.sh` and
+`SHA256SUMS` (produced with `shasum -a 256 netbird-delayed-update-macos.sh > SHA256SUMS`). The tag
+(e.g. `0.2.0`) must equal `SCRIPT_VERSION`. Without the assets, installed copies log it and stay as they are.
 
 ---
 
