@@ -26,6 +26,7 @@ export PATH
 # -------------------- Defaults / Config --------------------
 
 STATE_DIR="/var/lib/netbird-delayed-update"
+INSTALLED_SCRIPT_PATH="/usr/local/sbin/netbird-delayed-update-macos.sh"
 STATE_FILE="${STATE_DIR}/state.json"
 
 DEFAULT_LABEL="io.nethorror.netbird-delayed-update"
@@ -492,6 +493,7 @@ brew_has_cask() {
 
 brew_upgrade_netbird() {
   local kind="${1:-formula}"
+  local target="${2:-}"
 
   have_cmd brew || die "Homebrew not found, but install type detected as brew."
 
@@ -519,6 +521,17 @@ brew_upgrade_netbird() {
     formula="netbirdio/tap/netbird"
   fi
 
+  # Homebrew cannot install an arbitrary old version, so only upgrade when the
+  # formula currently offers exactly the matured version. Otherwise wait.
+  local offered
+  offered="$(brew_as_owner info --json=v2 "$formula" 2>/dev/null \
+    | grep -Eo '"stable"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
+    | sed -E 's/.*"([^"]+)"$/\1/' || true)"
+  if [[ -n "$target" && "$offered" != "$target" ]]; then
+    log "Homebrew offers '${offered:-unknown}', but the matured version is '${target}'; deferring upgrade."
+    return 0
+  fi
+
   log "Upgrading Homebrew formula: $formula"
   brew_as_owner upgrade "$formula"
 
@@ -528,7 +541,20 @@ brew_upgrade_netbird() {
 
 pkg_arch() { [[ "$(uname -m)" == "arm64" ]] && echo "arm64" || echo "amd64"; }
 
+# Print the version recorded in a flat .pkg (empty if it cannot be read).
+pkg_version() {
+  local pkg="$1" d ver=""
+  d="$(mktemp -d "/tmp/nbpkg.XXXXXX")"
+  if pkgutil --expand-full "$pkg" "$d/x" >/dev/null 2>&1; then
+    ver="$(grep -Eho 'version="[^"]+"' "$d"/x/*/PackageInfo 2>/dev/null | head -n1 \
+      | sed -E 's/.*"([^"]+)"$/\1/' || true)"
+  fi
+  rm -rf "$d"
+  echo "$ver"
+}
+
 pkg_upgrade_netbird() {
+  local target="${1:-}"
   local arch tmp_pkg pkg_url
   arch="$(pkg_arch)"
   pkg_url="https://pkgs.netbird.io/macos/${arch}"
@@ -536,7 +562,23 @@ pkg_upgrade_netbird() {
 
   log "Downloading NetBird pkg for arch ${arch} from ${pkg_url}"
   curl -fsSL --retry 3 --connect-timeout 10 --max-time 300 -o "$tmp_pkg" "$pkg_url" \
-    || die "Failed to download NetBird pkg."
+    || { rm -f "$tmp_pkg"; die "Failed to download NetBird pkg."; }
+
+  # The URL always serves "latest", which may be newer than the version that
+  # aged. Check the signer and the version before running anything as root.
+  if ! pkgutil --check-signature "$tmp_pkg" 2>/dev/null | grep -q "NetBird GmbH"; then
+    rm -f "$tmp_pkg"
+    die "NetBird pkg is not signed by NetBird GmbH; not installing."
+  fi
+  if [[ -n "$target" ]]; then
+    local pkg_ver
+    pkg_ver="$(pkg_version "$tmp_pkg")"
+    if [[ "$pkg_ver" != "$target" ]]; then
+      rm -f "$tmp_pkg"
+      log "Downloaded pkg is version '${pkg_ver:-unknown}', but the matured version is '${target}'; deferring."
+      return 0
+    fi
+  fi
 
   log "Installing NetBird pkg..."
   installer -pkg "$tmp_pkg" -target / >/dev/null
@@ -546,20 +588,22 @@ pkg_upgrade_netbird() {
 }
 
 other_upgrade_netbird() {
+  local target="${1:-}"
   log "Install type is 'other' — attempting upgrade via pkg download+install as fallback."
-  pkg_upgrade_netbird
+  pkg_upgrade_netbird "$target"
 }
 
 perform_upgrade() {
+  local target="${1:-}"
   local install_type
   install_type="$(detect_install_type)"
   log "Detected install type: $install_type"
 
   case "$install_type" in
-    brew_formula) brew_upgrade_netbird "formula" ;;
+    brew_formula) brew_upgrade_netbird "formula" "$target" ;;
     brew_cask)    brew_upgrade_netbird "cask" ;;
-    pkg)          pkg_upgrade_netbird ;;
-    *)            other_upgrade_netbird ;;
+    pkg)          pkg_upgrade_netbird "$target" ;;
+    *)            other_upgrade_netbird "$target" ;;
   esac
 }
 
@@ -571,8 +615,8 @@ render_plist() {
   local hh="${DAILY_TIME%:*}" mm="${DAILY_TIME#*:}"
   hh=$((10#$hh)); mm=$((10#$mm))
 
-  local script_path
-  script_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  # Always run the root-owned copy, never a file the user can edit.
+  local script_path="${INSTALLED_SCRIPT_PATH}"
 
   local args_xml="<string>${script_path}</string>
     <string>--delay-days</string><string>${DELAY_DAYS}</string>
@@ -626,6 +670,15 @@ install_daemon() {
 
   mkdir -p "$STATE_DIR"
   cleanup_old_logs
+
+  # Copy the script to a root-owned location so the root LaunchDaemon never
+  # executes a file that an ordinary user can modify.
+  local self_path; self_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  if [[ "$self_path" != "${INSTALLED_SCRIPT_PATH}" ]]; then
+    install -d -o root -g wheel -m 755 "$(dirname "${INSTALLED_SCRIPT_PATH}")"
+    install -o root -g wheel -m 755 "$self_path" "${INSTALLED_SCRIPT_PATH}"
+    log "Installed script copy: ${INSTALLED_SCRIPT_PATH}"
+  fi
 
   local plist; plist="$(plist_path)"
   log "Installing LaunchDaemon at: $plist"
@@ -839,7 +892,7 @@ run_cycle() {
 
   if version_lt "$local_ver" "$cand"; then
     log "Upgrade allowed: local ($local_ver) < candidate ($cand). Performing upgrade..."
-    perform_upgrade
+    perform_upgrade "$cand"
   else
     log "No upgrade needed: local ($local_ver) is not less than candidate ($cand)."
   fi
