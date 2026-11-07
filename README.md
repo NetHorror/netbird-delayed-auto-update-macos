@@ -12,44 +12,38 @@ FileVault is enabled — see below).
 
 ---
 
-## 🚀 Quick start
+## Quick start
 
-> ⚠️ FileVault note: if FileVault is enabled, you must unlock the disk at the FileVault prompt first. No VPN/launchd service can run *before* that.
+> ⚠️ **FileVault:** if FileVault is enabled, the disk must be unlocked at the FileVault prompt before anything runs. See [Limitations with FileVault](#limitations-with-filevault).
 
-### One-line install (release asset + SHA256 check)
-
-Downloads the script and `SHA256SUMS` from the GitHub release, verifies the checksum, and installs
-the LaunchDaemon. If NetBird is not installed, you are asked whether to install it now:
+### 1. Install
 
 ~~~bash
-VER=0.2.0; B="https://github.com/NetHorror/netbird-delayed-auto-update-macos/releases/download/${VER}"; cd "$(mktemp -d)" && curl -fsSLO "$B/netbird-delayed-update-macos.sh" && curl -fsSLO "$B/SHA256SUMS" && grep -E ' \*?netbird-delayed-update-macos\.sh$' SHA256SUMS | shasum -a 256 -c - && sudo bash ./netbird-delayed-update-macos.sh --install --run-at-load
+VER=0.2.0
+BASE=https://github.com/NetHorror/netbird-delayed-auto-update-macos/releases/download/$VER
+curl -fsSLO "$BASE/netbird-delayed-update-macos.sh"
+curl -fsSLO "$BASE/SHA256SUMS"
+shasum -a 256 -c SHA256SUMS --ignore-missing && sudo bash netbird-delayed-update-macos.sh --install --install-client
 ~~~
 
-Add `--install-client` to install NetBird without the question (e.g. in MDM/unattended setups).
+The install command:
 
-`--install` copies the script to `/usr/local/sbin/netbird-delayed-update-macos.sh` (`root:wheel`, `755`),
-and the LaunchDaemon always runs that copy.
+1. checks the script against `SHA256SUMS` from the release (the chain stops if the check fails);
+2. installs NetBird if it is missing (`--install-client`): with Homebrew (`netbirdio/tap/netbird`) if it is present, otherwise the official `.pkg` after a `NetBird GmbH` signature check;
+3. copies the script to `/usr/local/sbin/netbird-delayed-update-macos.sh` (`root:wheel`) and installs a daily LaunchDaemon (04:00).
 
-### Alternative: clone the repository
+> **The first install takes the current latest NetBird version.** The delay (`--delay-days`, 10 days by default) applies only to later updates.
+
+Optional: `--run-at-load` runs the check once at boot, `--auto-start` makes sure the NetBird daemon starts before logon.
+
+### 2. Check
 
 ~~~bash
-git clone https://github.com/NetHorror/netbird-delayed-auto-update-macos.git
-cd netbird-delayed-auto-update-macos
-chmod +x ./netbird-delayed-update-macos.sh
-sudo ./netbird-delayed-update-macos.sh --install --run-at-load
+sudo launchctl print system/io.nethorror.netbird-delayed-update | head -5
+sudo bash netbird-delayed-update-macos.sh --delay-days 0 --max-random-delay-seconds 0
 ~~~
 
-### NetBird client: first install vs. updates
-
-- If the `netbird` client is missing and the script runs **from a terminal**, it asks
-  `NetBird not found. Install now? [Y/n]` (Enter = yes).
-- With `--install-client` it installs without asking.
-- Under launchd (no terminal) it never installs: it logs a `WARNING` and exits with code 0.
-- Install method: Homebrew (`brew install netbirdio/tap/netbird`, run as the Homebrew owner) if `brew`
-  exists; otherwise the official pkg from `https://pkgs.netbird.io/macos/<arch>`, installed only if
-  `pkgutil --check-signature` shows `NetBird GmbH`.
-- ⚠️ **A first install takes the current latest NetBird version.** The `--delay-days` window applies
-  only to *updates* of an already installed client.
+The second command is a one-off run without delay. It can upgrade NetBird right away if a newer version exists.
 
 ---
 
