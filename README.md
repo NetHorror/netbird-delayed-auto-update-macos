@@ -19,11 +19,7 @@ FileVault is enabled — see below).
 ### 1. Install
 
 ~~~bash
-VER=0.2.0
-BASE=https://github.com/NetHorror/netbird-delayed-auto-update-macos/releases/download/$VER
-curl -fsSLO "$BASE/netbird-delayed-update-macos.sh"
-curl -fsSLO "$BASE/SHA256SUMS"
-shasum -a 256 -c SHA256SUMS --ignore-missing && sudo bash netbird-delayed-update-macos.sh --install --install-client
+curl -fsSL https://github.com/NetHorror/netbird-delayed-auto-update-macos/releases/download/0.2.0/install.sh | sudo bash
 ~~~
 
 The install command:
@@ -105,13 +101,13 @@ The second command is a one-off run without delay. It can upgrade NetBird right 
 ### Install LaunchDaemon
 
 ~~~bash
-sudo ./netbird-delayed-update-macos.sh --install --run-at-load
+sudo /usr/local/sbin/netbird-delayed-update-macos.sh --install --run-at-load
 ~~~
 
 With auto-start for NetBird daemon:
 
 ~~~bash
-sudo ./netbird-delayed-update-macos.sh --install --run-at-load --auto-start
+sudo /usr/local/sbin/netbird-delayed-update-macos.sh --install --run-at-load --auto-start
 ~~~
 
 ### Uninstall LaunchDaemon
@@ -119,25 +115,25 @@ sudo ./netbird-delayed-update-macos.sh --install --run-at-load --auto-start
 Safe uninstall (does NOT touch NetBird):
 
 ~~~bash
-sudo ./netbird-delayed-update-macos.sh --uninstall
+sudo /usr/local/sbin/netbird-delayed-update-macos.sh --uninstall
 ~~~
 
 Also remove state/logs:
 
 ~~~bash
-sudo ./netbird-delayed-update-macos.sh --uninstall --remove-state
+sudo /usr/local/sbin/netbird-delayed-update-macos.sh --uninstall --remove-state
 ~~~
 
 If you explicitly want to remove NetBird daemon auto-start too:
 
 ~~~bash
-sudo ./netbird-delayed-update-macos.sh --uninstall --remove-netbird-auto-start
+sudo /usr/local/sbin/netbird-delayed-update-macos.sh --uninstall --remove-netbird-auto-start
 ~~~
 
 ### Manual one-shot run
 
 ~~~bash
-sudo ./netbird-delayed-update-macos.sh --max-random-delay-seconds 0
+sudo /usr/local/sbin/netbird-delayed-update-macos.sh --max-random-delay-seconds 0
 ~~~
 
 ---
