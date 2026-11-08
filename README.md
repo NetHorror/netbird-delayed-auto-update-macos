@@ -19,11 +19,7 @@ FileVault is enabled — see below).
 ### 1. Install
 
 ~~~bash
-VER=0.2.0
-BASE=https://github.com/NetHorror/netbird-delayed-auto-update-macos/releases/download/$VER
-curl -fsSLO "$BASE/netbird-delayed-update-macos.sh"
-curl -fsSLO "$BASE/SHA256SUMS"
-shasum -a 256 -c SHA256SUMS --ignore-missing && sudo bash netbird-delayed-update-macos.sh --install --install-client
+curl -fsSL https://github.com/NetHorror/netbird-delayed-auto-update-macos/releases/download/0.2.0/install.sh | sudo bash
 ~~~
 
 The install command:
