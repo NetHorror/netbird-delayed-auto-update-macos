@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-line installer for netbird-delayed-update-macos.
-#   curl -fsSL https://github.com/NetHorror/netbird-delayed-auto-update-macos/releases/download/0.2.0/install.sh | sudo bash
+#   curl -fsSL https://github.com/NetHorror/netbird-delayed-auto-update-macos/releases/download/0.2.0/install-macos.sh | sudo bash
 # Downloads the script and SHA256SUMS of release 0.2.0, verifies the SHA-256 hash,
 # then runs the script with --install --install-client (extra arguments are passed on).
 main() {
@@ -14,7 +14,7 @@ main() {
     exit 1
   fi
   if [[ "$(id -u)" -ne 0 ]]; then
-    echo "Run as root: curl -fsSL <url>/install.sh | sudo bash" >&2
+    echo "Run as root: curl -fsSL <url>/install-macos.sh | sudo bash" >&2
     exit 1
   fi
 
