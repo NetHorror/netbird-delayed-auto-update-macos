@@ -15,6 +15,18 @@ jobs:
       - name: Syntax check
         run: bash -n netbird-delayed-update-macos.sh
 
+      - name: --help exits 0 and lists the new flags
+        run: |
+          bash netbird-delayed-update-macos.sh --help > help.txt
+          grep -q -- '--install-client' help.txt
+          grep -q -- '--no-self-update' help.txt
+
+      - name: Header version matches SCRIPT_VERSION
+        run: |
+          hdr="$(sed -nE 's/^# Version: ([0-9.]+)$/\1/p' netbird-delayed-update-macos.sh | head -n1)"
+          grep -q "^SCRIPT_VERSION=\"${hdr}\"$" netbird-delayed-update-macos.sh \
+            || { echo "Header version '${hdr}' != SCRIPT_VERSION" >&2; exit 1; }
+
       - name: Install ShellCheck
         run: brew install shellcheck
 
@@ -29,11 +41,19 @@ jobs:
       - name: Make executable
         run: chmod +x netbird-delayed-update-macos.sh
 
-      - name: Run once (NetBird not installed -> should exit cleanly)
-        run: sudo ./netbird-delayed-update-macos.sh --max-random-delay-seconds 0
+      # stdin is not a terminal here, so a missing client is only reported
+      # (WARNING, exit 0) and never installed. --no-self-update keeps the
+      # checked-out file untouched.
+      - name: Run once (NetBird not installed -> WARNING, exit 0, no install)
+        shell: bash  # -eo pipefail, so the script's exit code is not hidden by tee
+        run: |
+          sudo ./netbird-delayed-update-macos.sh --no-self-update --max-random-delay-seconds 0 </dev/null 2>&1 | tee run.log
+          if ! command -v netbird >/dev/null 2>&1; then
+            grep -q "WARNING: NetBird client not found" run.log
+          fi
 
       - name: Install LaunchDaemon
-        run: sudo ./netbird-delayed-update-macos.sh --install --label "io.nethorror.ci-test" --max-random-delay-seconds 0
+        run: sudo ./netbird-delayed-update-macos.sh --install --no-self-update --label "io.nethorror.ci-test" --max-random-delay-seconds 0 </dev/null
 
       - name: Verify LaunchDaemon was created
         run: sudo launchctl print system/io.nethorror.ci-test
